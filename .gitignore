@@ -1,0 +1,32 @@
+
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# API 密钥和环境变量
+.env
+.env.*
+!.env.example
+
+# PyCharm 配置
+.idea/
+
+# 测试输出和模型调用结果
+output/*
+!output/.gitkeep
+
+# 数据集和原始图片
+data/*
+!data/.gitkeep
+!data/README.md
+
+# Windows / macOS 系统文件
+Thumbs.db
+.DS_Store
