@@ -25,7 +25,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from src.schemas import AnalysisResult, Observation, ReviewReport
+from src.schemas import AnalysisResult, Observation, ReportDraft, ReviewReport
 
 # A 阶段最多返回几个候选区域。
 # 这个数必须和 Observation.findings 的 max_length 一致，改一处就要改另一处。
@@ -256,6 +256,70 @@ def parse_review(text: str) -> ReviewReport:
         return ReviewReport.model_validate(data)
     except ValidationError as exc:
         raise ValueError(_compact_error(exc)) from exc
+
+
+def _strip_label_prefix(text: str, *labels: str) -> str:
+    """去掉模型自己加的"依据：""风险："前缀。
+
+    卡片排版时字段名是代码画的，模型再写一遍就会变成
+    "依据：依据R1的裂隙……"。提示词里已经要求不要写，但模型很爱照着
+    示例抄，所以在解析层再兜一次——比在渲染层做字符串替换干净。
+    """
+    cleaned = text.strip()
+
+    # 循环剥，直到没有前缀为止。
+    # "依据：依据R1的裂隙" 这种双层前缀确实出现过——模型既照抄了示例里的
+    # "依据："，又在正文里重复了一次。剥一次不够。
+    changed = True
+    while changed:
+        changed = False
+        for label in labels:
+            for separator in ("：", ":"):
+                prefix = f"{label}{separator}"
+                if cleaned.startswith(prefix):
+                    cleaned = cleaned[len(prefix):].strip()
+                    changed = True
+
+    return cleaned
+
+
+def parse_report(text: str) -> ReportDraft:
+    """C 成稿的输出解析：文本 -> ReportDraft。
+
+    这里要多做一件事：检查 basis 里有没有提到区域编号。
+    赛题要求"建议要说明依据"，而依据如果连"对应哪个区域"都不写，
+    就是一句放之四海皆准的套话，等于没有依据。
+    这一步拦在解析层，比等卡片印出来再发现要好。
+    """
+    data = extract_json(text)
+
+    try:
+        draft = ReportDraft.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(_compact_error(exc)) from exc
+
+    # 去掉模型照抄示例带上的字段名前缀，避免卡片上出现"依据：依据……"
+    for rec in draft.recommendations:
+        rec.action = _strip_label_prefix(rec.action, "建议", "action")
+        rec.basis = _strip_label_prefix(rec.basis, "依据", "basis")
+        rec.risk = _strip_label_prefix(rec.risk, "风险", "risk")
+
+    missing_region = [
+        index + 1
+        for index, rec in enumerate(draft.recommendations)
+        if not re.search(r"R[1-9]", rec.basis)
+    ]
+    if missing_region:
+        # 依据里不写对应哪个区域，就只是一句放之四海皆准的套话，
+        # 等于没有依据——而"建议及依据合理"是评分维度里的原话。
+        # 在这里抛错会触发一次重试，比等卡片印出来再发现便宜。
+        raise ValueError(
+            "recommendations.{}: basis 里必须写明对应的区域编号（如 R1）".format(
+                missing_region[0] - 1
+            )
+        )
+
+    return draft
 
 
 def _looks_legacy(data: dict) -> bool:

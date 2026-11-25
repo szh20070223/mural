@@ -76,6 +76,7 @@ VISION_PROMPT_VERSION = f"v{_version_match.group(1)}" if _version_match else "v1
 RAW_DIR = PROJECT_ROOT / "output" / "raw"
 OBSERVATION_DIR = PROJECT_ROOT / "output" / "observations"
 REVIEW_DIR = PROJECT_ROOT / "output" / "reviews"
+CARD_DIR = PROJECT_ROOT / "output" / "cards"
 TRACE_DIR = PROJECT_ROOT / "output" / "trace"
 
 # ---------------------------------------------------------------------------

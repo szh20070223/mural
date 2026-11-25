@@ -22,17 +22,22 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
+from src.agents.report_agent import ReportAgent
 from src.agents.review_agent import ReviewAgent
 from src.agents.vision_agent import VisionAgent
-from src.config import OBSERVATION_DIR, PROJECT_ROOT, RAW_DIR, REVIEW_DIR
+from src.card_builder import build_card
+from src.config import CARD_DIR, OBSERVATION_DIR, PROJECT_ROOT, RAW_DIR, REVIEW_DIR
 from src.qwen_client import ModelReply, QwenClient
-from src.result_parser import parse_any, parse_review
+from src.render import render_card
+from src.result_parser import parse_any, parse_report, parse_review
 from src.review_rules import apply_verdicts
-from src.trace import RunTrace
+from src.schemas import Region
+from src.trace import RunTrace, now_iso
 
 # 最多尝试几次。2 次是权衡：第一次失败后带着错误信息重问，成功率很高；
 # 再加就是提示词或模型能力的问题了，多花的调用换不来质量。
@@ -134,27 +139,38 @@ def run_vision_workflow(
     prompt_file: str | None = None,
     review: bool = True,
     review_prompt_file: str | None = None,
+    compose: bool = True,
+    report_prompt_file: str | None = None,
+    render: bool = True,
+    image_source: str = "命题方提供的比赛材料",
+    image_license: str = "仅限本次比赛使用",
+    scene_note: str = "",
 ) -> dict:
-    """跑一次完整流程（A 观察 + 可选 B 审查）。
+    """跑一次完整流程（A 观察 → B 审查 → C 成稿 → 卡片 → PDF）。
 
     参数：
         image_path          ：图片路径，相对路径按项目根目录解析
         prompt_file         ：可选，A 的提示词（评测时用来对比 v1/v2）
         review              ：是否跑 B 审查。调 A 的提示词时可以关掉省钱
         review_prompt_file  ：可选，B 的提示词
+        compose             ：是否跑 C 成稿并组装卡片。只关心候选时可关
+        report_prompt_file  ：可选，C 的提示词
+        render              ：是否渲染一页 PDF。关掉只出 card.json
+        image_source        ：图片来源，会原样写进卡片的来源区
+        image_license       ：授权说明，同上
+        scene_note          ：命题方给的场景说明，同上
 
     返回：
         {
           "image_id", "stage", "attempts", "result", "meta",
           "output_path", "trace_path", "run_id",
-          "review": {                          # review=False 或 A 没找到东西时为 None
-              "attempts":     B 调了几次,
-              "report":       裁决原文（含每条的理由）,
-              "regions":      最终进卡的 1-3 个区域,
-              "stats":        裁掉几条、合并几条、截断几条,
-              "output_path":  裁决落盘位置,
-          }
+          "review": {...} 或 None,
+          "card": {"json_path", "pdf_path", "summary", "recommendations"} 或 None
         }
+
+    注意 image_source / image_license 没有真正的默认值可言：
+    这里给的默认值只是"命题方比赛材料"的假设，自摄或公开数据集必须显式传。
+    来源写错的后果是"规范合规"这个维度直接失分，别依赖默认值。
     """
 
     # ---- 0. 路径处理 ----
@@ -235,6 +251,7 @@ def run_vision_workflow(
 
     # ---- 5. B：审查（v1 的输出没有坐标框，没法审查，直接跳过）----
     review_payload: dict | None = None
+    final_regions: list[Region] = []
 
     if review and stage == "observation":
         observation = observation_or_analysis
@@ -254,7 +271,7 @@ def run_vision_workflow(
                 candidates=len(observation.findings),
             )
 
-            report, _review_reply, review_attempts = _run_with_retry(
+            review_report, _review_reply, review_attempts = _run_with_retry(
                 trace=trace,
                 stage="b",
                 call=lambda history: reviewer.run(path, observation, history=history),
@@ -263,14 +280,17 @@ def run_vision_workflow(
                 raw_stem=f"{image_id}.review",
             )
 
-            report.image_id = image_id
+            review_report.image_id = image_id
 
             REVIEW_DIR.mkdir(parents=True, exist_ok=True)
             review_path = REVIEW_DIR / f"{image_id}.json"
-            review_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+            review_path.write_text(
+                review_report.model_dump_json(indent=2), encoding="utf-8"
+            )
 
             # 确定性后处理：合并、去重、截断、编号
-            regions, stats = apply_verdicts(observation, report)
+            regions, stats = apply_verdicts(observation, review_report)
+            final_regions = regions
 
             trace.log("review_applied", stage="b", **asdict(stats))
 
@@ -283,24 +303,97 @@ def run_vision_workflow(
 
             review_payload = {
                 "attempts": review_attempts,
-                "report": json.loads(report.model_dump_json()),
+                "report": json.loads(review_report.model_dump_json()),
                 "regions": [json.loads(region.model_dump_json()) for region in regions],
                 "stats": asdict(stats),
                 "output_path": str(review_path),
             }
 
-    # ---- 6. 收尾 ----
+    # ---- 6. C：成稿 + 组装卡片 + 渲染 ----
+    card_payload: dict | None = None
+
+    if compose and final_regions:
+        observation = observation_or_analysis
+        reporter = ReportAgent(client, prompt_path=report_prompt_file)
+
+        trace.log(
+            "report_start",
+            stage="c",
+            prompt_file=reporter.prompt_path.name,
+            prompt_version=reporter.version,
+            prompt_sha256=reporter.prompt_sha,
+            regions=len(final_regions),
+        )
+
+        draft, _report_reply, report_attempts = _run_with_retry(
+            trace=trace,
+            stage="c",
+            call=lambda history: reporter.run(
+                final_regions, observation.limitations, history=history
+            ),
+            parse=parse_report,
+            correction=reporter.correction_message,
+            raw_stem=f"{image_id}.report",
+        )
+
+        card = build_card(
+            image_id=image_id,
+            regions=final_regions,
+            draft=draft,
+            observation=observation,
+            image_source=image_source,
+            image_license=image_license,
+            scene_note=scene_note,
+            models=[client.model],
+            prompt_versions={
+                "a": agent.version,
+                "b": reviewer.version,
+                "c": reporter.version,
+            },
+            tools=["Pillow（卡片渲染）", f"Python {sys.version.split()[0]}"],
+            run_id=trace.run_id,
+            generated_at=now_iso(),
+        )
+
+        CARD_DIR.mkdir(parents=True, exist_ok=True)
+        card_json_path = CARD_DIR / f"{image_id}.json"
+        card_json_path.write_text(card.model_dump_json(indent=2), encoding="utf-8")
+
+        trace.log(
+            "card_built",
+            stage="c",
+            attempts=report_attempts,
+            regions=len(card.regions),
+            recommendations=len(card.recommendations),
+        )
+
+        # 渲染失败不应该让整次运行作废：card.json 已经落盘了，
+        # 至少数据还在，可以事后补渲染。
+        pdf_path: str | None = None
+        try:
+            rendered = render_card(card, path, CARD_DIR / f"{image_id}.pdf")
+            pdf_path = str(rendered)
+            trace.log("rendered", stage="c", pdf_path=pdf_path)
+        except Exception as exc:
+            trace.log("render_failed", stage="c", error=f"{type(exc).__name__}: {exc}")
+
+        card_payload = {
+            "attempts": report_attempts,
+            "summary": card.summary,
+            "recommendations": [rec.model_dump() for rec in card.recommendations],
+            "json_path": str(card_json_path),
+            "pdf_path": pdf_path,
+        }
+
+    # ---- 7. 收尾 ----
     trace.log(
         "run_end",
         ok=True,
         stage=stage,
         output_path=str(output_path),
-        regions=(
-            len(review_payload["regions"])
-            if review_payload
-            else len(observation_or_analysis.findings)
-        ),
+        regions=len(final_regions) if final_regions else len(observation_or_analysis.findings),
         review_ran=review_payload is not None,
+        card_built=card_payload is not None,
         a_attempts=a_attempts,
         a_latency_ms=a_reply.latency_ms,
     )
@@ -315,4 +408,5 @@ def run_vision_workflow(
         "trace_path": str(trace.path),
         "run_id": trace.run_id,
         "review": review_payload,
+        "card": card_payload,
     }

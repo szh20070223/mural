@@ -143,6 +143,31 @@ def _print_review(outcome: dict) -> None:
             print(f"      复核：{note}")
 
 
+def _print_card(outcome: dict) -> None:
+    """打印 C 成稿的结果和产物路径。"""
+    card = outcome.get("card")
+
+    print("\n" + "=" * 62)
+
+    if not card:
+        print("（未生成观察卡：候选被全部剔除，或用了 --no-compose）")
+        return
+
+    print("观察卡")
+    print("\n总述：", card["summary"])
+
+    for index, rec in enumerate(card["recommendations"], start=1):
+        print(f"\n  建议 {index}：{rec['action']}")
+        print(f"      依据：{rec['basis']}")
+        print(f"      风险：{rec['risk']}")
+
+    print("\n  card.json：", card["json_path"])
+    if card["pdf_path"]:
+        print("  一页 PDF ：", card["pdf_path"])
+    else:
+        print("  一页 PDF ：渲染失败，详见运行日志（card.json 仍然可用）")
+
+
 def _print_analysis(outcome: dict) -> None:
     """打印 v1（只有文字位置）的结果，用于和旧版本对照。"""
     result = outcome["result"]
@@ -180,6 +205,36 @@ def main() -> None:
         "调 A 的提示词时用，能省掉一次模型调用",
     )
 
+    parser.add_argument(
+        "--no-compose",
+        action="store_true",
+        help="跳过 C 成稿，只跑到审查结果。调 A/B 的提示词时用",
+    )
+
+    parser.add_argument(
+        "--no-render",
+        action="store_true",
+        help="不渲染 PDF，只输出 card.json",
+    )
+
+    # 来源信息没有安全的默认值：写错了"规范合规"这一项直接失分，
+    # 所以给成显式参数，让人每次都想过一遍。
+    parser.add_argument(
+        "--source",
+        default="命题方提供的比赛材料",
+        help="图片来源，会原样写进卡片（默认：命题方提供的比赛材料）",
+    )
+    parser.add_argument(
+        "--license",
+        default="仅限本次比赛使用",
+        help="授权说明，会原样写进卡片（默认：仅限本次比赛使用）",
+    )
+    parser.add_argument(
+        "--scene",
+        default="",
+        help="命题方给的场景说明，会原样写进卡片",
+    )
+
     args = parser.parse_args()
 
     image_path = _resolve_image(args.image)
@@ -189,6 +244,11 @@ def main() -> None:
             str(image_path),
             prompt_file=args.prompt,
             review=not args.no_review,
+            compose=not args.no_compose,
+            render=not args.no_render,
+            image_source=args.source,
+            image_license=args.license,
+            scene_note=args.scene,
         )
     except Exception as exc:
         # 这里把异常原样抛出去：堆栈对排查更有用，
@@ -199,6 +259,7 @@ def main() -> None:
     if outcome["stage"] == "observation":
         _print_observation(outcome)
         _print_review(outcome)
+        _print_card(outcome)
     else:
         _print_analysis(outcome)
 

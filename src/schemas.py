@@ -459,6 +459,30 @@ class Recommendation(BaseModel):
     )
 
 
+class ReportDraft(BaseModel):
+    """C 成稿的输出：卡片上"区域以外"的文字。
+
+    C 不看图片，只负责文字整理，所以它能决定的东西被刻意限制在
+    总述、建议、局限三样。区域相关的内容它不许改——
+    那是 A 观察官和 B 审查官的职责。这条边界很重要：
+    答辩时被问"这句话是谁写的"，必须能一句话答上来。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=4, max_length=80, description="一句话总述")
+    recommendations: list[Recommendation] = Field(
+        min_length=1,
+        max_length=2,
+        description="1-2 条建议，每条都要有依据和风险",
+    )
+    limitations: list[str] = Field(
+        default_factory=list,
+        max_length=3,
+        description="这张图看不准的地方",
+    )
+
+
 class Provenance(BaseModel):
     """来源与工具披露。
 
