@@ -25,7 +25,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
-from src.schemas import AnalysisResult, Observation
+from src.schemas import AnalysisResult, Observation, ReviewReport
 
 # A 阶段最多返回几个候选区域。
 # 这个数必须和 Observation.findings 的 max_length 一致，改一处就要改另一处。
@@ -234,6 +234,26 @@ def parse_analysis_result(text: str) -> AnalysisResult:
     data = extract_json(text)
     try:
         return AnalysisResult.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(_compact_error(exc)) from exc
+
+
+def parse_review(text: str) -> ReviewReport:
+    """B 审查官的输出解析：文本 -> ReviewReport。
+
+    比 A 那边少一层修补：裁决结果里没有坐标换算的问题，
+    bbox 只有在 adjust 的时候才出现，格式错一次就重试，不值当再写特例。
+    """
+    data = extract_json(text)
+
+    # verdicts 给 null 时兜成空列表：这和"一条都不裁"不是一回事，
+    # 但至少不会因为 None 直接崩，后面 apply_verdicts 会把未裁决的候选
+    # 全部保守保留并记 unjudged，日志里看得见。
+    if data.get("verdicts") is None:
+        data["verdicts"] = []
+
+    try:
+        return ReviewReport.model_validate(data)
     except ValidationError as exc:
         raise ValueError(_compact_error(exc)) from exc
 

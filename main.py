@@ -96,6 +96,53 @@ def _print_observation(outcome: dict) -> None:
     print("\n总述：", result.get("summary", ""))
 
 
+def _print_review(outcome: dict) -> None:
+    """打印 B 审查官的裁决过程和最终进卡的区域。"""
+    review = outcome.get("review")
+
+    if not review:
+        print("\n（未执行审查）")
+        return
+
+    print("\n" + "=" * 62)
+    print("B 审查官裁决")
+
+    for verdict in review["report"]["verdicts"]:
+        line = f"  {verdict['region_id']}  {verdict['decision']:<6} {verdict['reason']}"
+        print(line)
+        if verdict.get("adjusted_bbox"):
+            box = ", ".join(f"{value:.0%}" for value in verdict["adjusted_bbox"].values())
+            print(f"        改框：[{box}]")
+        if verdict.get("merge_into"):
+            print(f"        合并到：{verdict['merge_into']}")
+        for note in verdict.get("review_notes") or []:
+            print(f"        复核：{note}")
+
+    stats = review["stats"]
+    merged = stats["merged_by_model"] + stats["merged_by_iou"]
+    print(
+        f"\n  提出 {stats['proposed']} 条 → 砍掉 {stats['dropped']} 条"
+        f" / 合并 {merged} 条 → 进卡 {stats['final']} 条"
+    )
+    if stats["unjudged"]:
+        print(f"  ! {stats['unjudged']} 条没被模型裁决，已保守保留")
+
+    print("\n最终进卡：")
+    if not review["regions"]:
+        # 全部被砍掉时不要装作成功：卡片契约要求至少 1 个区域，
+        # 这种情况需要 C 阶段出"未发现明显病害"的变体卡（还没做）
+        print("  （全部候选都被砍掉了——这张图可能需要另一种卡片版式）")
+
+    for region in review["regions"]:
+        box = ", ".join(f"{value:.0%}" for value in region["bbox"].values())
+        print(f"\n  {region['region_id']}  {region['disease']}  置信度:{region['confidence']}")
+        print(f"      位置：[{box}]")
+        print(f"      观察：{region['observation']}")
+        print(f"      影响：{region['impact']}")
+        for note in region.get("review_notes") or []:
+            print(f"      复核：{note}")
+
+
 def _print_analysis(outcome: dict) -> None:
     """打印 v1（只有文字位置）的结果，用于和旧版本对照。"""
     result = outcome["result"]
@@ -126,12 +173,23 @@ def main() -> None:
         "不填则使用 config 里的默认值，可用环境变量 VISION_PROMPT_FILE 覆盖",
     )
 
+    parser.add_argument(
+        "--no-review",
+        action="store_true",
+        help="跳过 B 审查，只看 A 的候选区域。"
+        "调 A 的提示词时用，能省掉一次模型调用",
+    )
+
     args = parser.parse_args()
 
     image_path = _resolve_image(args.image)
 
     try:
-        outcome = run_vision_workflow(str(image_path), prompt_file=args.prompt)
+        outcome = run_vision_workflow(
+            str(image_path),
+            prompt_file=args.prompt,
+            review=not args.no_review,
+        )
     except Exception as exc:
         # 这里把异常原样抛出去：堆栈对排查更有用，
         # 只留一句"分析失败"会把真正的原因藏起来
@@ -140,6 +198,7 @@ def main() -> None:
 
     if outcome["stage"] == "observation":
         _print_observation(outcome)
+        _print_review(outcome)
     else:
         _print_analysis(outcome)
 

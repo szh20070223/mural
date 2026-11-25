@@ -75,6 +75,7 @@ VISION_PROMPT_VERSION = f"v{_version_match.group(1)}" if _version_match else "v1
 #   trace/        每次运行的完整日志，一行一个事件
 RAW_DIR = PROJECT_ROOT / "output" / "raw"
 OBSERVATION_DIR = PROJECT_ROOT / "output" / "observations"
+REVIEW_DIR = PROJECT_ROOT / "output" / "reviews"
 TRACE_DIR = PROJECT_ROOT / "output" / "trace"
 
 # ---------------------------------------------------------------------------

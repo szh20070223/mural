@@ -309,14 +309,57 @@ class ReviewVerdict(BaseModel):
     哪个候选被删了、为什么删、哪个框被改小了、改的依据是什么。
     """
 
-    region_id: str
+    region_id: str = Field(
+        pattern=r"^C[1-9]$",
+        description="被裁决的候选编号，必须和 A 给出的编号一致",
+    )
     # keep=保留  adjust=改框后保留  drop=剔除  merge=与另一个候选合并
     decision: Literal["keep", "adjust", "drop", "merge"]
-    reason: str = Field(min_length=4, max_length=80)
+    reason: str = Field(
+        min_length=4,
+        max_length=80,
+        description="裁决理由。必须说清'图上哪里不对'或'为什么成立'，"
+        "只写'证据不足'不算理由——那是结论，不是依据",
+    )
     # adjust 时给新框；其余情况留空
     adjusted_bbox: BoundingBox | None = None
+    # 改判病害类型时才填。拿不准就留空，在 reason 里说明
+    adjusted_disease: DiseaseName | None = None
+    # 调高或调低置信度时才填
+    adjusted_confidence: RegionConfidence | None = None
+    # merge 时必填：合并到哪一个候选
+    merge_into: str | None = Field(
+        default=None,
+        pattern=r"^C[1-9]$",
+        description="merge 时必填，指向被合并到的那个候选编号",
+    )
     # 这一条进卡时，需要人复核的具体点。建议每条都写，空着说明审得不细
     review_notes: list[str] = Field(default_factory=list, max_length=2)
+
+    @field_validator("region_id", "merge_into", mode="before")
+    @classmethod
+    def _fix_region_id(cls, value: object) -> object:
+        """候选编号写歪了自动纠正，规则见 _normalize_region_id。"""
+        return _normalize_region_id(value, "C")
+
+    @model_validator(mode="after")
+    def _check_decision_payload(self) -> "ReviewVerdict":
+        """裁决和附件字段必须自洽。
+
+        这三条校验都是为了防止"看起来审了、其实没审"：
+          - adjust 不给新框 -> 等于没调整
+          - merge 不指定目标 -> 不知道并到哪
+          - 合并到自己 -> 死循环
+        这些错误在渲染阶段很难发现，必须在这里拦住。
+        """
+        if self.decision == "adjust" and self.adjusted_bbox is None:
+            raise ValueError(f"{self.region_id}: decision=adjust 必须给出 adjusted_bbox")
+        if self.decision == "merge":
+            if self.merge_into is None:
+                raise ValueError(f"{self.region_id}: decision=merge 必须给出 merge_into")
+            if self.merge_into == self.region_id:
+                raise ValueError(f"{self.region_id}: 不能合并到自己")
+        return self
 
 
 class ReviewReport(BaseModel):
