@@ -68,7 +68,7 @@
     "ai_generated": ["区域 R1-R3 的观察描述", "两条建议的文字表述", "总述 summary"],
     "human_review_required": ["R2 的病害类型判定", "建议 1 的现场重拍可行性"],
     "human_reviewed": ["R1 裂纹范围", "总述措辞"],
-    "reviewer": "苏日玛"
+    "reviewer": "R4"
   },
   "review_status": "已人工复核并修改"
 }
