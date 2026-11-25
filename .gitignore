@@ -26,7 +26,15 @@ output/*
 data/*
 !data/.gitkeep
 !data/README.md
+# 标注"格式示例"要进仓库，队友 clone 下来才有得参考；
+# 真实的 labels.jsonl 仍然忽略，那是数据不是代码
+!data/labels.example.jsonl
 
 # Windows / macOS 系统文件
 Thumbs.db
 .DS_Store
+
+# 本地临时目录（pip 安装失败时可能残留，不影响项目）
+.tmp/
+# 本地调试输出（沙箱受限时用，正常情况下用 output/）
+.local-run/

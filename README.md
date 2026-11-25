@@ -21,3 +21,48 @@ DASHSCOPE_API_KEY=这个是密钥
 QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 QWEN_MODEL=qwen3.8-max
 ）没有传
+
+---
+
+## 文档索引
+
+动手写代码前先看这两份，字段以它们为准：
+
+- [docs/card-contract.md](docs/card-contract.md) — **一页观察卡的数据契约**。
+  最终交付物长什么样、每个字段多少字、谁能改什么，都在这里。
+- [docs/annotation.md](docs/annotation.md) — **标注规范**。
+  标什么、不标什么、框怎么画、验收标准。
+
+配套的示例和工具：
+
+- [docs/card.example.json](docs/card.example.json) — 一张填满字数上限的示例卡，
+  做版式直接拿它排。能排下它，真实数据就都能排下。
+- [data/labels.example.jsonl](data/labels.example.jsonl) — 标注格式示例。
+- `tools/check_contract.py` — 契约自检，改完东西跑一下：
+
+  ```bash
+  python tools/check_contract.py
+  python tools/check_contract.py --labels data/labels.jsonl
+  ```
+
+## 一句话说清现在的状态
+
+- **能跑**：单张图 → A 观察 → 若干候选区域（带归一化坐标框）→ JSON + 运行日志
+- **还没做**：B 审查、C 成稿、一页卡渲染、标注集、回归评测
+- **别训模型**：现场赛只认百炼平台的模型能力
+
+跑一次：
+
+```bash
+python main.py data/images/test_mural1.png
+```
+
+两个实测数字（qwen3.8-max，同一张 1123×756 的壁画）：
+
+| | 耗时 | 输出 token | 候选数 |
+|---|---|---|---|
+| 思考链开着 | 109 秒 | 4955 | 1 个 |
+| 思考链关掉 | 13 秒 | 675 | 4 个 |
+
+所以默认关闭思考链（`QWEN_ENABLE_THINKING`）。这个任务要的是"把看到的说清楚"，
+不需要长链推理；想太久反而容易收敛到一个结论上。

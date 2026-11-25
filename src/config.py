@@ -1,17 +1,85 @@
 # src/config.py
-# 统一管理配置
+# 统一管理配置：环境变量都在这里读一次，别的地方不要再去碰 os.getenv
 import os
+import re
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# 显式指定 .env 的位置，不依赖当前工作目录。
+#
+# 踩过的坑：PyCharm 里点"运行"时工作目录通常是项目根，没问题；
+# 但如果从别的目录执行 `python E:\py\mural-api-test\main.py`，
+# load_dotenv() 会去**那个**目录找 .env，找不到就报"没有配置 DASHSCOPE_API_KEY"，
+# 报错信息会把你引向一个完全无关的方向。
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
+
+# ---------------------------------------------------------------------------
+# 模型接入
+# ---------------------------------------------------------------------------
 
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 QWEN_BASE_URL = os.getenv(
     "QWEN_BASE_URL",
-    "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    "https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
 QWEN_MODEL = os.getenv("QWEN_MODEL")
 
+# 单次请求超时（秒）。不设的话，网络卡住时脚本会一直挂着——
+# 演示当天最怕的就是"看起来在跑，其实早就死了"。
+QWEN_TIMEOUT = float(os.getenv("QWEN_TIMEOUT", "120"))
+
+# 思考链开关（Qwen3 系列支持 enable_thinking）。
+#
+# 实测数据（qwen3.8-max，1123x756 的壁画图，同一份提示词）：
+#   开着：109 秒，completion 4955 token，只给出 1 个候选区域
+#   关掉： 12 秒，completion  557 token，给出 3 个候选区域
+#
+# 快了 9 倍，而且结果更全。原因也容易理解：这个任务要的是
+# "把看到的说清楚"，不需要绕一圈推理；想太久反而容易收敛到一个结论上。
+#
+# 默认关闭。想要长链推理时：$env:QWEN_ENABLE_THINKING="true"
+QWEN_ENABLE_THINKING = os.getenv("QWEN_ENABLE_THINKING", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+# ---------------------------------------------------------------------------
+# 提示词版本
+# ---------------------------------------------------------------------------
+# 用环境变量切换，而不是改代码里的字符串。这样 v1/v2 可以并排跑、对比效果：
+#   PowerShell:  $env:VISION_PROMPT_FILE="vision_analysis.txt"
+#
+# 默认 v2：带坐标框的版本，能出观察卡。
+# v1 是早期只出"文字位置"的老版本，只保留作对照，出不了卡片。
+VISION_PROMPT_FILE = os.getenv("VISION_PROMPT_FILE", "vision_analysis_v2.txt")
+
+VISION_PROMPT_PATH = PROJECT_ROOT / "prompts" / VISION_PROMPT_FILE
+
+# 版本号从文件名里取：vision_analysis_v2.txt -> "v2"。
+# 这个值会写进卡片的 provenance.prompt_version，用来回答
+# "这张卡是哪个版本的提示词生成的"——答辩时被问到就靠它。
+_version_match = re.search(r"_v(\d+)$", VISION_PROMPT_PATH.stem)
+VISION_PROMPT_VERSION = f"v{_version_match.group(1)}" if _version_match else "v1"
+
+# ---------------------------------------------------------------------------
+# 输出目录
+# ---------------------------------------------------------------------------
+# 分三类放：
+#   raw/          模型原始回复，出问题时第一时间看这里
+#   observations/ A 阶段解析后的结构化结果（中间产物）
+#   trace/        每次运行的完整日志，一行一个事件
+RAW_DIR = PROJECT_ROOT / "output" / "raw"
+OBSERVATION_DIR = PROJECT_ROOT / "output" / "observations"
+TRACE_DIR = PROJECT_ROOT / "output" / "trace"
+
+# ---------------------------------------------------------------------------
+# 启动自检
+# ---------------------------------------------------------------------------
 if not DASHSCOPE_API_KEY:
     raise RuntimeError("没有配置 DASHSCOPE_API_KEY，请检查 .env 文件")
 
