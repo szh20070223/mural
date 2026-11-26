@@ -115,8 +115,22 @@ def _normalize_disease(value: object) -> object:
     return value
 
 
-# 带上别名归一化的病害名，字段里统一用这个类型
+# 8 类真实病害：标注、评测用这个。
 DiseaseName = Annotated[DiseaseType, BeforeValidator(_normalize_disease)]
+
+# 9 类 = 8 个真实病害 + "待判读"。
+#
+# "待判读"不是第九种病害，是"这处确实有异常、但类型判断不了"这个**结论**。
+# 只给模型输出用（A 的候选、B 的改判、卡片上的区域）；
+# 标注集不能用它——标注是标准答案，"看不清"应该走 assessment 字段。
+#
+# 为什么要分成两个类型而不是加进 DiseaseType 再排除：
+#   加进去之后，标注校验就得额外维护一份"排除表"，那种补丁迟早会漏。
+#   分开定义，标注那边天然只有 8 个，不需要任何排除逻辑。
+ObservationDisease = Annotated[
+    DiseaseType | Literal["待判读"],
+    BeforeValidator(_normalize_disease),
+]
 
 
 def _normalize_region_id(value: object, prefix: str) -> object:
@@ -257,8 +271,10 @@ class ObservedRegion(BaseModel):
     那是审查官该干的事，不是观察官该干的事。
     """
 
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     region_id: str = Field(pattern=r"^C[1-9]$", description="候选编号 C1-C5")
-    disease: DiseaseName
+    disease: ObservationDisease
     bbox: BoundingBox
     observation: str = Field(
         min_length=4,
@@ -300,6 +316,18 @@ class Observation(BaseModel):
     limitations: list[str] = Field(default_factory=list, max_length=3)
     summary: str = Field(default="", max_length=120)
 
+    @model_validator(mode="after")
+    def _unique_ids(self) -> "Observation":
+        """候选编号不能重复。
+
+        重复的后果很隐蔽：B 的裁决是按编号映射的，两个 C1 只有一个能命中，
+        另一个会被当成"漏判"保守保留——日志里只多一个数字，看不出来。
+        """
+        ids = [item.region_id for item in self.findings]
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"候选 region_id 不能重复：{ids}")
+        return self
+
 
 class ReviewVerdict(BaseModel):
     """B 审查官对一个候选区域的裁决（也是一份可展示的证据）。
@@ -309,22 +337,30 @@ class ReviewVerdict(BaseModel):
     哪个候选被删了、为什么删、哪个框被改小了、改的依据是什么。
     """
 
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     region_id: str = Field(
         pattern=r"^C[1-9]$",
         description="被裁决的候选编号，必须和 A 给出的编号一致",
     )
-    # keep=保留  adjust=改框后保留  drop=剔除  merge=与另一个候选合并
-    decision: Literal["keep", "adjust", "drop", "merge"]
+    # keep=保留  adjust=改判后保留  defer=保留位置但类型待判
+    # drop=剔除  merge=与另一个候选合并
+    decision: Literal["keep", "adjust", "drop", "merge", "defer"]
     reason: str = Field(
         min_length=4,
         max_length=80,
         description="裁决理由。必须说清'图上哪里不对'或'为什么成立'，"
         "只写'证据不足'不算理由——那是结论，不是依据",
     )
+    # 改判文字：任何裁决都能用，不只是 adjust。
+    # 这是"B 的结论能传导到卡片"的唯一通道——没有它，
+    # B 就算判定"性质待定"，卡片上写的仍然是 A 那句"露出下层底色"。
+    adjusted_observation: str | None = Field(default=None, min_length=4, max_length=60)
+    adjusted_impact: str | None = Field(default=None, min_length=4, max_length=40)
     # adjust 时给新框；其余情况留空
     adjusted_bbox: BoundingBox | None = None
     # 改判病害类型时才填。拿不准就留空，在 reason 里说明
-    adjusted_disease: DiseaseName | None = None
+    adjusted_disease: ObservationDisease | None = None
     # 调高或调低置信度时才填
     adjusted_confidence: RegionConfidence | None = None
     # merge 时必填：合并到哪一个候选
@@ -346,19 +382,49 @@ class ReviewVerdict(BaseModel):
     def _check_decision_payload(self) -> "ReviewVerdict":
         """裁决和附件字段必须自洽。
 
-        这三条校验都是为了防止"看起来审了、其实没审"：
-          - adjust 不给新框 -> 等于没调整
-          - merge 不指定目标 -> 不知道并到哪
-          - 合并到自己 -> 死循环
+        这几条校验都是为了拦住"看起来审了、其实没审"：
+          - adjust 一个 adjusted_* 都不给 -> 等于没调整
+          - defer 不说清看得见什么 -> 等于把"不知道"直接印在卡片上
+          - merge 不指定目标 / 合并到自己 -> 不知道并到哪
         这些错误在渲染阶段很难发现，必须在这里拦住。
         """
-        if self.decision == "adjust" and self.adjusted_bbox is None:
-            raise ValueError(f"{self.region_id}: decision=adjust 必须给出 adjusted_bbox")
+        # adjust 至少要真的调整了点什么，否则等于没调整
+        if self.decision == "adjust" and not any(
+            value is not None
+            for value in (
+                self.adjusted_bbox,
+                self.adjusted_disease,
+                self.adjusted_confidence,
+                self.adjusted_observation,
+                self.adjusted_impact,
+            )
+        ):
+            raise ValueError(
+                f"{self.region_id}: decision=adjust 至少要给出一个 adjusted_* 字段"
+            )
+
+        # 改类型（或 defer）必须同时改写文字。
+        # 只改类型不改描述，卡片上就会留下"水渍：……露出灰褐色下层"
+        # 这种前后打架的话——那正是 ulti 那张卡的另一半病根。
+        if self.adjusted_disease is not None or self.decision == "defer":
+            if not self.adjusted_observation or not self.adjusted_impact:
+                raise ValueError(
+                    f"{self.region_id}: 改判类型或 defer 时，必须同时给出"
+                    "中性的 adjusted_observation 和 adjusted_impact"
+                )
+
         if self.decision == "merge":
+           
             if self.merge_into is None:
                 raise ValueError(f"{self.region_id}: decision=merge 必须给出 merge_into")
             if self.merge_into == self.region_id:
                 raise ValueError(f"{self.region_id}: 不能合并到自己")
+        elif self.merge_into is not None:
+            # 非 merge 决策带 merge_into，数据里就留下一条没人执行的指令，
+            # apply_verdicts 也会忽略它——不如在门口拦掉
+            raise ValueError(
+                f"{self.region_id}: 只有 decision=merge 才能指定 merge_into"
+            )
         return self
 
 
@@ -373,6 +439,18 @@ class ReviewReport(BaseModel):
     image_id: str
     verdicts: list[ReviewVerdict] = Field(default_factory=list)
     reviewer_notes: list[str] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> "ReviewReport":
+        """裁决编号不能重复。
+
+        重复裁决会让同一条候选被处理两次（计数翻倍、区域被合并掉一次），
+        而且 B 自己不会觉得有问题。在数据层拦掉，触发一次重试。
+        """
+        ids = [item.region_id for item in self.verdicts]
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"裁决 region_id 不能重复：{ids}")
+        return self
 
 
 # =============================================================================
@@ -390,9 +468,11 @@ class Region(BaseModel):
     超过这个数，渲染器就必须缩字号或者溢出——两种都很难看。
     """
 
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     region_id: str = Field(pattern=r"^R[1-9]$", description="卡片上的编号 R1-R3")
 
-    disease: DiseaseName
+    disease: ObservationDisease
 
     bbox: BoundingBox
 
@@ -442,6 +522,8 @@ class Recommendation(BaseModel):
     空着就意味着这条建议没经过风险思考，评委一眼能看出来。
     """
 
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     action: str = Field(min_length=4, max_length=60, description="建议做什么")
     basis: str = Field(
         min_length=4,
@@ -481,6 +563,17 @@ class ReportDraft(BaseModel):
         max_length=3,
         description="这张图看不准的地方",
     )
+
+    @model_validator(mode="after")
+    def _require_review(self) -> "ReportDraft":
+        """模型不能自己决定"这条建议不需要人复核"。
+
+        needs_human_review 是给人工复核流程用的开关，默认 True。
+        如果允许模型把它设成 False，等于让被审查的对象决定"我不用被审查"。
+        """
+        if any(not item.needs_human_review for item in self.recommendations):
+            raise ValueError("模型生成的建议必须标记 needs_human_review=true")
+        return self
 
 
 class Provenance(BaseModel):
@@ -660,7 +753,8 @@ class AnnotationRegion(BaseModel):
 
     bbox: BoundingBox
     disease: DiseaseName
-    severity: Severity
+    # 严重程度允许留空：单张照片看不出轻重，不要逼标注人猜
+    severity: Severity | None = None
     note: str = Field(default="", max_length=40, description="一句话备注，给标注人自己看")
     rank: int = Field(ge=1, le=3, description="重要程度排序，1 最重要")
 
@@ -686,12 +780,34 @@ class AnnotationRecord(BaseModel):
         default=False,
         description="True 表示这张图没有需要标记的病害（含纯纹样、完好壁画）",
     )
+    # "看不清"和"看清了确实没有"必须分开。
+    #
+    # 混在一起的后果：拍虚的图被标成负样本，模型说"这有异常"就记成一次误报，
+    # 误报率直接失真。所以单独一个字段，评测时这一组只统计拒判，不进召回/误报。
+    assessment: Literal["可判读", "无法判断"] = "可判读"
+    assessment_note: str = Field(
+        default="",
+        max_length=200,
+        description="无法判读的原因、以及需要补什么证据",
+    )
     annotator: str = Field(default="", description="标注人，方便追责和复核")
     regions: list[AnnotationRegion] = Field(default_factory=list, max_length=3)
 
     @model_validator(mode="after")
     def _check_consistency(self) -> "AnnotationRecord":
         """负样本不能有框，正样本不能没框，rank 不能重复。"""
+        if self.assessment == "无法判断":
+            # 无法判读的图既不是负样本，也不该有确诊区域
+            if self.negative or self.regions:
+                raise ValueError(
+                    f"{self.image_id}: assessment=无法判断 时不能标为负样本，也不能给 regions"
+                )
+            if not self.assessment_note.strip():
+                raise ValueError(
+                    f"{self.image_id}: assessment=无法判断 时必须写清原因（assessment_note）"
+                )
+            return self
+
         if self.negative and self.regions:
             raise ValueError(f"{self.image_id}: negative=true 时 regions 必须为空")
         if not self.negative and not self.regions:

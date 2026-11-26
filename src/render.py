@@ -237,10 +237,14 @@ def render_card(card: Card, image_path: str | Path, out_pdf: str | Path) -> Path
     thumb_box = (MARGIN, 316, right_edge, 1356)
     _paste_thumbnail(canvas, image_path, card, thumb_box)
 
-    # 图注：提醒这不是原尺寸，避免被当成"精确测量图"
+    # 图注：提醒这不是原尺寸，避免被当成"精确测量图"。
+    # 措辞不能写"已校准""已复核"——右上角的徽章才是复核状态的唯一来源，
+    # 图注如果抢着下结论，就会和徽章自相矛盾（之前就出现过
+    # "已人工复核前校准"配着"待人工复核"徽章的情况）。
     draw.text(
         (MARGIN, 1368),
-        "缩略图（按比例缩放）；彩色框对应下方 R1–R3 区域，坐标由模型给出并已人工复核前校准",
+        "缩略图（按比例缩放）；彩色框为 AI 初步定位，对应下方区域编号，"
+        "复核结论以卡片右上角状态与下方复核记录为准",
         font=_font(22),
         fill=COLOR_MUTED,
     )

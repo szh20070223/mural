@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import re
+
 from src.schemas import (
     Attribution,
     Card,
@@ -64,6 +66,34 @@ def _build_attribution(regions: list[Region]) -> Attribution:
     )
 
 
+def _dedupe_limitations(items: list[str]) -> list[str]:
+    """按"开头十来个字"去重。
+
+    同一条局限经常被三拨人换个说法各写一遍：
+      A："粉化需近距离观察表面质感，仅凭此图无法确认"
+      B："粉化需近距离观察表面质感，当前分辨率下无法判断"
+    精确匹配抓不住，按开头去重能抓住绝大多数重复。
+
+    只用于卡片的显示层——observation.json / review.json 里的原文一个字不动，
+    想追溯完整表述去那两个文件。
+    """
+    seen: set[str] = set()
+    kept: list[str] = []
+
+    for item in items:
+        text = item.strip()
+        if not text:
+            continue
+        # 去掉标点再取前 12 字做 key，避免"逗号位置不同"被当成两条
+        key = re.sub(r"[\s，。；、：,.;:（）()「」]", "", text)[:12]
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(text)
+
+    return kept
+
+
 def build_card(
     *,
     image_id: str,
@@ -78,6 +108,8 @@ def build_card(
     run_id: str,
     generated_at: str,
     scene_note: str = "",
+    platform: str = "阿里云百炼（DashScope）",
+    upstream_limitations: list[str] | None = None,
 ) -> Card:
     """把三段产物拼成一张 Card。
 
@@ -94,14 +126,30 @@ def build_card(
     if len(regions) > 3:
         raise ValueError(f"卡片最多 3 个区域，收到 {len(regions)} 个")
 
-    # 局限优先用 C 重写过的；C 没给就退回 A 的原始局限
-    limitations = draft.limitations or observation.limitations[:3]
+    # 局限必须以**上游**为主，C 只能补充，不能替换。
+    #
+    # 旧写法：draft.limitations or observation.limitations
+    #   C 只要给出一条，A 的"缺侧光、无法判断起甲"就整个消失——
+    #   而那句恰恰是"AI 能力边界"最硬的证据，直接影响评分。
+    #
+    # 现在的规则：上游（A 的整体局限 + B 的总体意见）在前，C 的补充在后，
+    # 去重后最多 3 条。超过时优先保留上游、截掉 C 的——
+    # 因为上游是"看图的一线判断"，C 只是文字整理。
+    #
+    # 不再把 6 条压成 3 组长句：那样虽然一条不丢，但每组长达一百多字，
+    # 复核的人根本读不完——"写全"不等于"说明清楚"。
+    upstream = (
+        list(upstream_limitations)
+        if upstream_limitations is not None
+        else list(observation.limitations)
+    )
+    limitations = _dedupe_limitations([*upstream, *draft.limitations])[:3]
 
     provenance = Provenance(
         image_source=image_source,
         image_license=image_license,
         scene_note=scene_note,
-        platform="阿里云百炼（DashScope）",
+        platform=platform,
         models=models,
         prompt_version=" / ".join(
             f"{key.upper()}:{value}" for key, value in prompt_versions.items()

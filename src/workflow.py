@@ -26,17 +26,26 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from src.agents.report_agent import ReportAgent
 from src.agents.review_agent import ReviewAgent
 from src.agents.vision_agent import VisionAgent
 from src.card_builder import build_card
-from src.config import CARD_DIR, OBSERVATION_DIR, PROJECT_ROOT, RAW_DIR, REVIEW_DIR
+from src.config import (
+    CARD_DIR,
+    OBSERVATION_DIR,
+    PROJECT_ROOT,
+    QWEN_BASE_URL,
+    QWEN_REVIEW_CROPS,
+    RAW_DIR,
+    REVIEW_DIR,
+)
 from src.qwen_client import ModelReply, QwenClient
 from src.render import render_card
 from src.result_parser import parse_any, parse_report, parse_review
-from src.review_rules import apply_verdicts
-from src.schemas import Region
+from src.review_rules import apply_verdicts, validate_review
+from src.schemas import Region, ReviewReport
 from src.trace import RunTrace, now_iso
 
 # 最多尝试几次。2 次是权衡：第一次失败后带着错误信息重问，成功率很高；
@@ -56,6 +65,19 @@ def _image_size(path: Path) -> tuple[int | None, int | None]:
             return image.size
     except Exception:
         return None, None
+
+
+def _platform_name() -> str:
+    """按实际配置的 endpoint 推断平台名，**不写死**。
+
+    如果 QWEN_BASE_URL 不是 dashscope.aliyuncs.com（比如某个第三方中转），
+    卡片上就应该如实写那台主机。赛题里"隐瞒第三方平台/工具"是取消成绩
+    级别的问题，而"顺手写死成百炼"恰恰是最容易犯的那个错。
+    """
+    host = urlsplit(QWEN_BASE_URL).hostname or ""
+    if host.startswith("dashscope.") and host.endswith("aliyuncs.com"):
+        return "阿里云百炼（DashScope）"
+    return f"OpenAI 兼容服务（{host or '未知主机'}）"
 
 
 def _run_with_retry(
@@ -102,7 +124,9 @@ def _run_with_retry(
             completion_tokens=reply.completion_tokens,
             finish_reason=reply.finish_reason,
             response_chars=len(reply.content),
-            thinking_param_sent=reply.thinking_param_sent,
+            # 记的是"关掉了没有"，不是"发没发参数"——
+            # 之前那个字段名让人以为 true = 开着思考，实际正相反
+            thinking="off" if reply.thinking_disabled else "on",
         )
 
         # 原始回复一定要留：出问题时要看的是"模型到底说了什么"，
@@ -113,6 +137,13 @@ def _run_with_retry(
         )
 
         try:
+            # finish_reason 不是 stop，说明输出被截断或异常结束了。
+            # 这时 JSON 通常也是断的，但如果直接往下解析，报出来的会是
+            # "第 37 行解析失败"——排查方向完全错。先报真正的原因。
+            if reply.finish_reason not in (None, "stop"):
+                raise ValueError(
+                    f"模型未正常结束（finish_reason={reply.finish_reason}），已经截断，需要完整 JSON"
+                )
             return parse(reply.content), reply, attempts
         except ValueError as exc:
             trace.log("parse_fail", stage=stage, attempt=attempts, error=str(exc))
@@ -185,6 +216,12 @@ def run_vision_workflow(
     image_id = path.stem
     width, height = _image_size(path)
 
+    # 先确认图片真能解码，再开始花钱调模型。
+    # 不然会拿着一张坏图跑完 A、B、C 三次调用，最后渲染时才炸——
+    # 那时已经付过费了，而且报错指向的是渲染器，方向完全错。
+    if width is None or height is None:
+        raise ValueError(f"图片无法解码（可能已损坏或格式不支持）：{path}")
+
     # ---- 1. 开日志 ----
     trace = RunTrace(image_id=image_id)
     trace.log(
@@ -252,6 +289,10 @@ def run_vision_workflow(
     # ---- 5. B：审查（v1 的输出没有坐标框，没法审查，直接跳过）----
     review_payload: dict | None = None
     final_regions: list[Region] = []
+    # 提前声明：C 阶段要用 B 的 reviewer_notes（并进局限性）。
+    # 不能只在 if 分支里定义——那会变成"靠 final_regions 非空隐式保证
+    # review_report 存在"的写法，以后一改流程就是 NameError。
+    review_report: ReviewReport | None = None
 
     if review and stage == "observation":
         observation = observation_or_analysis
@@ -269,13 +310,16 @@ def run_vision_workflow(
                 prompt_version=reviewer.version,
                 prompt_sha256=reviewer.prompt_sha,
                 candidates=len(observation.findings),
+                crops_sent=QWEN_REVIEW_CROPS,
             )
 
             review_report, _review_reply, review_attempts = _run_with_retry(
                 trace=trace,
                 stage="b",
                 call=lambda history: reviewer.run(path, observation, history=history),
-                parse=parse_review,
+                # 解析之后立刻做一次跨阶段校验：B 编出来的编号在这里就炸，
+                # 而不是等到 apply_verdicts 里被静默忽略
+                parse=lambda text: validate_review(observation, parse_review(text)),
                 correction=reviewer.correction_message,
                 raw_stem=f"{image_id}.review",
             )
@@ -292,6 +336,23 @@ def run_vision_workflow(
             regions, stats = apply_verdicts(observation, review_report)
             final_regions = regions
 
+            # 把"候选 → 裁决 → 最终区域"的完整映射单独落一份，
+            # 和原始裁决分开存：原始裁决是模型说的，这份是代码处理后的，
+            # 两者放在一起才解释得清"为什么最后剩这三条"。
+            applied_path = REVIEW_DIR / f"{image_id}.applied.json"
+            applied_path.write_text(
+                json.dumps(
+                    {
+                        "report": json.loads(review_report.model_dump_json()),
+                        "regions": [json.loads(region.model_dump_json()) for region in regions],
+                        "stats": asdict(stats),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
             trace.log("review_applied", stage="b", **asdict(stats))
 
             if not regions:
@@ -307,6 +368,7 @@ def run_vision_workflow(
                 "regions": [json.loads(region.model_dump_json()) for region in regions],
                 "stats": asdict(stats),
                 "output_path": str(review_path),
+                "applied_path": str(applied_path),
             }
 
     # ---- 6. C：成稿 + 组装卡片 + 渲染 ----
@@ -316,6 +378,21 @@ def run_vision_workflow(
         observation = observation_or_analysis
         reporter = ReportAgent(client, prompt_path=report_prompt_file)
 
+        # 上游局限合并传给 C，而不是只给 A 那一份：
+        #   A 的整体局限 + B 的总体意见
+        # （每条候选自带的局限**不往卡上放**：它用的是 C1/C2 编号，
+        #   而卡片上只有 R1–R3，读者对不上；完整内容都在 observation.json 里。）
+        # 旧写法是 draft.limitations or A.limitations——C 一开口，
+        # A 的"缺侧光无法判断起甲"就没了，而那正是 AI 边界最硬的证据。
+        upstream_limitations = list(
+            dict.fromkeys(
+                [
+                    *observation.limitations,
+                    *(review_report.reviewer_notes if review_report else []),
+                ]
+            )
+        )
+
         trace.log(
             "report_start",
             stage="c",
@@ -323,15 +400,19 @@ def run_vision_workflow(
             prompt_version=reporter.version,
             prompt_sha256=reporter.prompt_sha,
             regions=len(final_regions),
+            upstream_limitations=len(upstream_limitations),
         )
 
         draft, _report_reply, report_attempts = _run_with_retry(
             trace=trace,
             stage="c",
             call=lambda history: reporter.run(
-                final_regions, observation.limitations, history=history
+                final_regions, upstream_limitations, history=history
             ),
-            parse=parse_report,
+            # 把最终区域的编号传进去：C 引用了不存在的 R5 会被当场拦住
+            parse=lambda text: parse_report(
+                text, {region.region_id for region in final_regions}
+            ),
             correction=reporter.correction_message,
             raw_stem=f"{image_id}.report",
         )
@@ -353,6 +434,8 @@ def run_vision_workflow(
             tools=["Pillow（卡片渲染）", f"Python {sys.version.split()[0]}"],
             run_id=trace.run_id,
             generated_at=now_iso(),
+            upstream_limitations=upstream_limitations,
+            platform=_platform_name(),
         )
 
         CARD_DIR.mkdir(parents=True, exist_ok=True)

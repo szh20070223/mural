@@ -67,12 +67,43 @@ def _strip_code_fence(text: str) -> str:
 
 
 def _remove_trailing_commas(text: str) -> str:
-    """删掉对象/数组结尾多余的逗号。
+    """删掉对象/数组结尾多余的逗号，但**只在字符串外面动手**。
 
-    JSON 不允许 {"a": 1,} 这种写法，但模型非常爱这么写，
+    JSON 不允许 {"a": 1,} 这种写法，而模型非常爱这么写，
     是所有格式错误里最常见的一种。
+
+    为什么不用正则：简单替换 `,(\\s*[}\\]])` 会连正文一起改。
+    比如观察里写着 "裂纹,断裂,分叉"，虽然这里侥幸不会误伤，
+    但只要正文里出现 `,]` 这种组合就会被改掉——而证据正文一旦被改，
+    "模型到底说了什么"就说不清了。
+
+    所以逐字符扫一遍：记下当前是否在字符串内、上一个字符是不是转义符，
+    只在字符串外删逗号。
     """
-    return re.sub(r",(\s*[}\]])", r"\1", text)
+    result: list[str] = []
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(text):
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        if char == ",":
+            following = text[index + 1:].lstrip()
+            if following.startswith(("}", "]")):
+                continue  # 这个逗号后面直接是收尾括号，删掉
+        result.append(char)
+
+    return "".join(result)
 
 
 def extract_json(text: str) -> dict:
@@ -94,9 +125,6 @@ def extract_json(text: str) -> dict:
     attempts = (
         candidate,
         _remove_trailing_commas(candidate),
-        _remove_trailing_commas(candidate)
-        .replace("“", '"')
-        .replace("”", '"'),
     )
 
     last_error: json.JSONDecodeError | None = None
@@ -194,10 +222,11 @@ def parse_observation(text: str) -> tuple[Observation, ParseMeta]:
 
     raw_findings = data.get("findings")
     if not isinstance(raw_findings, list):
-        # 模型有时会把 findings 写成 null 或字符串，这里兜成空列表，
-        # 空列表是合法的（"这张图没看出问题"本来就是一种合法输出）
-        raw_findings = []
-        data["findings"] = raw_findings
+        # 以前这里会兜成 []，但那等于把两件事混成一件：
+        #   "模型看过了，确实没发现问题" 和 "模型漏了这个字段"
+        # 前者是合法输出（该正常出卡），后者是格式错误（该重试）。
+        # 兜成空列表的后果是：可能静默交一张空卡上去。
+        raise ValueError("findings 必须是数组；确实没看出问题时请给空数组 []")
 
     meta.raw_findings = len(raw_findings)
 
@@ -246,11 +275,10 @@ def parse_review(text: str) -> ReviewReport:
     """
     data = extract_json(text)
 
-    # verdicts 给 null 时兜成空列表：这和"一条都不裁"不是一回事，
-    # 但至少不会因为 None 直接崩，后面 apply_verdicts 会把未裁决的候选
-    # 全部保守保留并记 unjudged，日志里看得见。
-    if data.get("verdicts") is None:
-        data["verdicts"] = []
+    # verdicts 必须是数组。给 null 不能当成"一条都不裁"——
+    # 那会让整次审查变成空转，而 A 的候选被"保守保留"看起来一切正常。
+    if not isinstance(data.get("verdicts"), list):
+        raise ValueError("verdicts 必须是数组，且要覆盖全部候选")
 
     try:
         return ReviewReport.model_validate(data)
@@ -283,7 +311,13 @@ def _strip_label_prefix(text: str, *labels: str) -> str:
     return cleaned
 
 
-def parse_report(text: str) -> ReportDraft:
+# 匹配"R1"这种区域编号，但要求两侧不是字母数字。
+# 为什么要加边界：不写边界的话，正文里的 "RGB"、"R10" 都会被当成引用，
+# 甚至 "DR1" 也算——那会让"依据缺失"的检查误判成通过。
+_REGION_REF = re.compile(r"(?<![A-Za-z0-9])R[1-9][0-9]*(?![A-Za-z0-9])")
+
+
+def parse_report(text: str, region_ids: set[str] | None = None) -> ReportDraft:
     """C 成稿的输出解析：文本 -> ReportDraft。
 
     这里要多做一件事：检查 basis 里有没有提到区域编号。
@@ -307,7 +341,7 @@ def parse_report(text: str) -> ReportDraft:
     missing_region = [
         index + 1
         for index, rec in enumerate(draft.recommendations)
-        if not re.search(r"R[1-9]", rec.basis)
+        if not _REGION_REF.search(rec.basis)
     ]
     if missing_region:
         # 依据里不写对应哪个区域，就只是一句放之四海皆准的套话，
@@ -319,7 +353,20 @@ def parse_report(text: str) -> ReportDraft:
             )
         )
 
-    return draft
+    # 引用的区域必须真的存在于卡片上。
+    # C 看不到区域清单之外的东西，写出 R5 就是编的——
+    # 而"建议指向一个不存在的区域"在评审眼里比建议空洞更糟。
+    allowed = region_ids if region_ids is not None else {"R1", "R2", "R3"}
+    for rec in draft.recommendations:
+        refs = set(_REGION_REF.findall(rec.basis))
+        if refs - allowed:
+            raise ValueError(
+                f"建议依据引用了不存在的区域：{sorted(refs - allowed)}，"
+                f"本卡只有 {sorted(allowed)}"
+            )
+
+    # 剥前缀之后字段可能变短，重新过一遍校验（比如 basis 只剩两个字）
+    return ReportDraft.model_validate(draft.model_dump())
 
 
 def _looks_legacy(data: dict) -> bool:

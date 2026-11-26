@@ -83,6 +83,7 @@ class ReviewStats:
     unjudged: int = 0          # 模型漏判、被保守保留的
     dropped: int = 0           # 被判 drop 的
     adjusted: int = 0          # 被判 adjust 的
+    deferred: int = 0          # 位置保留、类型待判的（defer）
     merged_by_model: int = 0   # 模型主动要求合并的
     merge_orphan: int = 0      # 要合并但目标不在保留列表里，只好独立保留的
     merge_box_mismatch: int = 0  # 说是同一处、但两个框根本不重叠的
@@ -99,7 +100,39 @@ class _Candidate:
     box: BoundingBox
     disease: str
     confidence: str
+    observation: str            # 新增：可被 B 的 adjusted_observation 覆盖
+    impact: str                 # 新增
     review_notes: list[str] = field(default_factory=list)
+
+
+def validate_review(observation: Observation, report: ReviewReport) -> ReviewReport:
+    """检查 B 的裁决和 A 的候选对不对得上。
+
+    三件事，缺一不可——这是"B 是裁决者"而不是"B 是过滤器"的前提：
+      1. 裁决里的编号必须真的在候选里（B 编出 C7 是常见的）
+      2. 编号不能重复
+      3. **每一条候选都必须有裁决**。漏一条就报错，触发一次格式纠正重试。
+
+    为什么第 3 条要用强约束：漏裁的候选会被"保守保留"混进卡片，
+    看起来一切正常，但那条其实**没被审过**。B 的职责是逐条裁决，
+    少答一条就等于审查没做完——这种半成品不该进入下游。
+    """
+    known = [finding.region_id for finding in observation.findings]
+    judged = [verdict.region_id for verdict in report.verdicts]
+
+    unknown = sorted(set(judged) - set(known))
+    if unknown:
+        raise ValueError(
+            f"裁决里出现了不存在的候选编号：{unknown}；A 实际只给了 {known}"
+        )
+
+    missing = [region_id for region_id in known if region_id not in set(judged)]
+    if missing:
+        raise ValueError(
+            f"漏裁了候选 {missing}；必须对 {known} 每一条都给出裁决，一条都不能少"
+        )
+
+    return report
 
 
 def apply_verdicts(
@@ -125,6 +158,13 @@ def apply_verdicts(
     by_id = {finding.region_id: finding for finding in observation.findings}
     verdict_by_id = {verdict.region_id: verdict for verdict in report.verdicts}
 
+    # B 的输出顺序就是优先级。
+    # A 排出的是"哪里最可疑"，B 排出的是"哪里最该进卡"——这两件事不一样，
+    # 而最终卡片应该听 B 的：它看过图，还做过取舍。
+    priority = {
+        verdict.region_id: index for index, verdict in enumerate(report.verdicts)
+    }
+
     kept: list[_Candidate] = []
     index: dict[str, int] = {}
     pending_merge: list = []
@@ -144,6 +184,8 @@ def apply_verdicts(
                     box=finding.bbox,
                     disease=finding.disease,
                     confidence=finding.confidence,
+                    observation=finding.observation,
+                    impact=finding.impact,
                 )
             )
             index[finding.region_id] = len(kept) - 1
@@ -158,16 +200,39 @@ def apply_verdicts(
             pending_merge.append(verdict)
             continue
 
-        # keep / adjust
-        candidate = _Candidate(
-            source=finding,
-            box=verdict.adjusted_bbox or finding.bbox,
-            disease=verdict.adjusted_disease or finding.disease,
-            confidence=verdict.adjusted_confidence or finding.confidence,
-            review_notes=list(verdict.review_notes),
-        )
-        if verdict.decision == "adjust":
-            stats.adjusted += 1
+        # keep / adjust / defer
+        # 文字先取裁决里的版本，没有就沿用 A 的。
+        # 这一句是"B 的改判能落到卡片上"的关键：以前这里直接取
+        # candidate.source.observation，B 说什么都传不下去。
+        observation = verdict.adjusted_observation or finding.observation
+        impact = verdict.adjusted_impact or finding.impact
+
+        if verdict.decision == "defer":
+            # 位置可信、类型不可判：保留框，类型写"待判读"，置信度压到"低"。
+            # 进卡时它是一条"线索"而不是"结论"——
+            # C 写总述时看到"待判读"，就不敢写成"大面积脱落"这种断言。
+            candidate = _Candidate(
+                source=finding,
+                box=verdict.adjusted_bbox or finding.bbox,
+                disease="待判读",
+                confidence=verdict.adjusted_confidence or "低",
+                observation=observation,
+                impact=impact,
+                review_notes=list(verdict.review_notes),
+            )
+            stats.deferred += 1
+        else:
+            candidate = _Candidate(
+                source=finding,
+                box=verdict.adjusted_bbox or finding.bbox,
+                disease=verdict.adjusted_disease or finding.disease,
+                confidence=verdict.adjusted_confidence or finding.confidence,
+                observation=observation,
+                impact=impact,
+                review_notes=list(verdict.review_notes),
+            )
+            if verdict.decision == "adjust":
+                stats.adjusted += 1
 
         kept.append(candidate)
         index[finding.region_id] = len(kept) - 1
@@ -188,6 +253,8 @@ def apply_verdicts(
                         box=verdict.adjusted_bbox or source.bbox,
                         disease=verdict.adjusted_disease or source.disease,
                         confidence=verdict.adjusted_confidence or source.confidence,
+                        observation=verdict.adjusted_observation or source.observation,
+                        impact=verdict.adjusted_impact or source.impact,
                         review_notes=list(verdict.review_notes),
                     )
                 )
@@ -217,7 +284,14 @@ def apply_verdicts(
     deduped: list[_Candidate] = []
     for candidate in kept:
         for existing in deduped:
-            if iou(existing.box, candidate.box) >= iou_threshold:
+            # 必须是**同一种病害**才合并。
+            # 这条判断不是形式主义：裂缝穿过颜料脱落区时，两个框必然大面积重叠，
+            # 不分类型合并就会把其中一条的类型直接抹掉——
+            # 卡片上剩一条，看起来很正常，但类型可能正好错了。
+            if (
+                existing.disease == candidate.disease
+                and iou(existing.box, candidate.box) >= iou_threshold
+            ):
                 existing.box = union_box(existing.box, candidate.box)
                 existing.confidence = _stronger(existing.confidence, candidate.confidence)
                 for note in candidate.review_notes:
@@ -228,7 +302,10 @@ def apply_verdicts(
         else:
             deduped.append(candidate)
 
-    # ---- ④ 截断 + 重新编号 ----
+    # ---- ④ 按 B 的优先级排序、截断、重新编号 ----
+    # 排序放在去重之后：合并会把两条并成一条，先排序再合并会白排。
+    deduped.sort(key=lambda item: priority.get(item.source.region_id, 10_000))
+
     if len(deduped) > max_regions:
         stats.truncated = len(deduped) - max_regions
         deduped = deduped[:max_regions]
@@ -240,8 +317,8 @@ def apply_verdicts(
                 region_id=f"R{order}",
                 disease=candidate.disease,
                 bbox=candidate.box,
-                observation=candidate.source.observation,
-                impact=candidate.source.impact,
+                observation=candidate.observation,
+                impact=candidate.impact,
                 confidence=candidate.confidence,
                 review_notes=candidate.review_notes[:2],
                 ai_generated=True,

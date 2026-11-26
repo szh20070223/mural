@@ -17,7 +17,7 @@ import json
 import re
 from pathlib import Path
 
-from src.config import PROJECT_ROOT
+from src.config import PROJECT_ROOT, QWEN_REVIEW_CROPS
 from src.qwen_client import ModelReply, QwenClient
 from src.schemas import Observation
 from src.trace import sha256_short
@@ -90,7 +90,19 @@ class ReviewAgent:
             raise FileNotFoundError(f"图片不存在：{path}")
 
         prompt = self.build_prompt(observation, image_id=path.stem)
-        return self.client.analyze_image(str(path), prompt, history=history)
+
+        # B 除了整张图，还能收到每个候选的局部放大。
+        # 这不是锦上添花：判断"框贴不贴、边缘有没有起翘、缺块边界是锐利还是渐变"
+        # 靠一张缩略的全图基本做不到，而这恰恰是 B 该干的活。
+        crops = (
+            [(finding.region_id, finding.bbox) for finding in observation.findings]
+            if QWEN_REVIEW_CROPS
+            else None
+        )
+
+        return self.client.analyze_image(
+            str(path), prompt, history=history, crops=crops
+        )
 
     def correction_message(self, error: str) -> str:
         """解析失败时的纠正说明，和 A 的版本略有不同。"""

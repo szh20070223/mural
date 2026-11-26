@@ -162,6 +162,7 @@ def check_labels(path: Path) -> bool:
     lines = path.read_text(encoding="utf-8").splitlines()
     total = 0                 # 有效记录数
     negatives = 0             # 负样本数
+    unassessable = 0          # 无法判读的（既不是负样本，也不该算正样本）
     failed = 0                # 解析/校验失败的行数
     disease_counter: Counter[str] = Counter()   # 每类病害出现了几次
     area_ratios: list[float] = []               # 框面积占比，用来看框是不是画太大
@@ -188,7 +189,9 @@ def check_labels(path: Path) -> bool:
             continue
 
         total += 1
-        if record.negative:
+        if record.assessment == "无法判断":
+            unassessable += 1
+        elif record.negative:
             negatives += 1
         for region in record.regions:
             disease_counter[region.disease] += 1
@@ -210,7 +213,13 @@ def check_labels(path: Path) -> bool:
         return False
 
     # ---- 统计信息：直接回答"这份数据够不够用" ----
-    print(f"    图片：{total} 张（负样本 {negatives} 张，正样本 {total - negatives} 张）")
+    # 「无法判读」单独列出来：它既不是负样本，也不进召回/误报统计，
+    # 混进去会让误报率失真（看不清 ≠ 确认没病害）。
+    positive = total - negatives - unassessable
+    print(
+        f"    图片：{total} 张（正样本 {positive}，负样本 {negatives}，"
+        f"无法判读 {unassessable}）"
+    )
     print(f"    标注框：{len(area_ratios)} 个")
 
     if disease_counter:
@@ -227,6 +236,8 @@ def check_labels(path: Path) -> bool:
     if not is_example:
         if negatives < 20:
             print(f"  ! 提醒：负样本只有 {negatives} 张，规范要求 ≥20")
+        # 病害白名单只有 8 个真实病害；"待判读"是审查环节的结论，
+        # 用了独立的类型（ObservationDisease），不会出现在标注集里。
         for disease in DISEASE_TYPES:
             if disease_counter[disease] < 3:
                 print(f"  ! 提醒：{disease} 只有 {disease_counter[disease]} 个框，规范要求 ≥3")

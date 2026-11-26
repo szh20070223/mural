@@ -20,12 +20,14 @@
 from __future__ import annotations
 
 import base64
+import io
 import mimetypes
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from openai import OpenAI
+from PIL import Image
 
 from src.config import (
     DASHSCOPE_API_KEY,
@@ -70,11 +72,13 @@ class ModelReply:
     prompt_tokens: int | None    # 输入 token（接口没返回就是 None）
     completion_tokens: int | None
     finish_reason: str | None    # "stop" 正常结束；"length" 说明被截断
-    # 这次请求有没有真的带上 enable_thinking 参数。
-    # 注意语义：关闭思考链也必须**显式**发 false——不发参数的话，
-    # 服务端会按模型默认值来（多半是开着），耗时差 6 倍以上。
-    # 这个坑吃过一次，专门留个字段记着。
-    thinking_param_sent: bool = False
+    # 这次请求有没有**真的把思考链关掉**。
+    #
+    # 注意语义：关闭思考链也必须**显式**发 enable_thinking=false——
+    # 不发参数的话服务端会按模型默认值来（多半是开着），耗时差好几倍。
+    # 所以不能写成"有没有发参数"，那会让人误以为 true = 开着思考。
+    # True = 已显式要求关闭；False = 没关成（配置要求开、或模型不认这个参数）。
+    thinking_disabled: bool = False
 
 
 class QwenClient:
@@ -127,30 +131,88 @@ class QwenClient:
     # 消息构造
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _encode_crop(photo: "Image.Image", bbox, max_side: int = 800) -> str:
+        """把一个候选区域裁出来、留一圈边、放大，编码成 data URL。
+
+        两个细节：
+          - **必须留边**：只裁框内会丢掉"边界在哪"的上下文，
+            而判断颜料层脱落最关键的恰恰就是边界。
+            这里按框宽高的 15% 外扩，最多到图片边界。
+          - **小图要放大**：面部那种 16%×9% 的框在原图上只有两百来像素，
+            视觉编码器对几十像素的细节基本无感。放大不增加信息，
+            但能让模型真的"看见"边缘。
+        """
+        width, height = photo.size
+        x1, y1, x2, y2 = bbox.to_pixels(width, height)
+
+        pad_x = int((x2 - x1) * 0.15)
+        pad_y = int((y2 - y1) * 0.15)
+        box = (
+            max(0, x1 - pad_x),
+            max(0, y1 - pad_y),
+            min(width, x2 + pad_x),
+            min(height, y2 + pad_y),
+        )
+
+        crop = photo.crop(box)
+
+        scale = min(4.0, max_side / max(crop.size))
+        if scale > 1:
+            crop = crop.resize(
+                (int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS
+            )
+
+        buffer = io.BytesIO()
+        crop.save(buffer, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
     def build_image_messages(
         self,
         image_path: str,
         prompt: str,
         history: list[dict] | None = None,
+        crops: list[tuple[str, object]] | None = None,
     ) -> list[dict]:
         """拼出一条完整的消息列表。
+
+        crops：可选的 [(region_id, BoundingBox), ...]。
+        传了的话，除了整张图，还会按顺序附上每个候选的局部裁剪，
+        并在每张裁剪前面标一句"这是同一张图的局部放大"——
+        不标的话模型很容易当成"又是另一张壁画"。
 
         history 用来做"自修复重试"：第一次输出格式不对时，把模型自己的
         错误回复和一句纠正说明接在后面，让它看着自己的输出改。
         比重新问一遍有效得多——重问它大概率还是同样的错。
         """
-        messages: list[dict] = [
+        content: list[dict] = [
+            {"type": "text", "text": prompt},
             {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
+                "type": "image_url",
+                "image_url": {"url": self.encode_image(image_path)},
+            },
+        ]
+
+        if crops:
+            with Image.open(image_path) as source:
+                photo = source.convert("RGB")
+
+            for region_id, bbox in crops:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"裁剪图 {region_id}：这是同一张图的局部放大，"
+                        f"用来核对框位和边缘细节，不是另一张图。",
+                    }
+                )
+                content.append(
                     {
                         "type": "image_url",
-                        "image_url": {"url": self.encode_image(image_path)},
-                    },
-                ],
-            }
-        ]
+                        "image_url": {"url": self._encode_crop(photo, bbox)},
+                    }
+                )
+
+        messages: list[dict] = [{"role": "user", "content": content}]
 
         if history:
             messages.extend(history)
@@ -224,8 +286,10 @@ class QwenClient:
             completion_tokens=getattr(usage, "completion_tokens", None) if usage else None,
             finish_reason=finish_reason,
             # 兜底之后 _thinking_param_supported 会变成 False，
-            # 所以这里能如实反映"这次请求到底带没带上这个参数"
-            thinking_param_sent=send_flag and self._thinking_param_supported,
+            # 所以这里能如实反映"这次到底有没有把思考关掉"
+            thinking_disabled=send_flag
+            and self._thinking_param_supported
+            and not self.thinking_enabled,
         )
 
     def analyze_image(
@@ -233,7 +297,10 @@ class QwenClient:
         image_path: str,
         prompt: str,
         history: list[dict] | None = None,
+        crops: list[tuple[str, object]] | None = None,
     ) -> ModelReply:
         """一步到位：图 + 提示词 -> 回执。日常调用走这个就行。"""
-        messages = self.build_image_messages(image_path, prompt, history=history)
+        messages = self.build_image_messages(
+            image_path, prompt, history=history, crops=crops
+        )
         return self.chat(messages)
