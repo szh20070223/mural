@@ -11,6 +11,7 @@ function loadImage(file) {
   if (!file) return;
   if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 10 * 1024 * 1024) {
     setMessage('请选择 10 MB 以内的 PNG、JPEG 或 WebP 图片。', true);
+    setWizardNotice('请选择 10 MB 以内的 PNG、JPEG 或 WebP 图片。', true);
     return;
   }
   const reader = new FileReader();
@@ -30,6 +31,7 @@ function loadImage(file) {
     $('dropZone').classList.add('loaded');
     $('analyzeBtn').disabled = false;
     $('modelState').textContent = '待分析';
+    setWizardStep(1);
     fields.forEach(id => { $(id).value = ''; });
     $('modelFindings').replaceChildren(); $('modelFindings').classList.add('hidden');
     renderMarkers();
@@ -198,12 +200,52 @@ function syncSheet() {
 fields.forEach(id => $(id).addEventListener('input', syncSheet));
 $('reviewConfirmed').addEventListener('change', syncSheet);
 $('printBtn').addEventListener('click', () => {
-  if (!state.image) { setMessage('请先上传图片。', true); return; }
-  if (!$('imageSource').value.trim() || !$('imageLicense').value.trim()) { setMessage('请先填写图片来源与授权范围。', true); return; }
-  if (!$('reviewConfirmed').checked) { setMessage('请先对照原图复核，并勾选人工复核确认。', true); return; }
+  if (!state.image) { setWizardStep(1); setWizardNotice('请先上传图片。', true); return; }
+  if (!$('imageSource').value.trim() || !$('imageLicense').value.trim()) { setWizardStep(1); setWizardNotice('请先填写图片来源与授权范围。', true); return; }
+  if (!$('reviewConfirmed').checked) { setWizardStep(3); setWizardNotice('请先对照原图复核，并勾选人工复核确认。', true); return; }
   syncSheet(); window.print();
 });
 syncSheet();
+
+let wizardStep = 1;
+const wizardHints = [
+  '先上传壁画原图，并填写来源与授权。',
+  '可调用模型辅助观察，也可在左侧原图上手动标记；逐项核对结论。',
+  '补全建议和来源，确认人工复核后导出一页观察卡。',
+];
+function setWizardNotice(message, error = false) {
+  $('wizardStatus').textContent = message;
+  $('wizardStatus').classList.toggle('error', error);
+}
+function setWizardStep(step) {
+  wizardStep = Math.max(1, Math.min(3, step));
+  $('workbench').dataset.step = String(wizardStep);
+  document.querySelectorAll('.wizard-tab').forEach(tab => {
+    const active = Number(tab.dataset.step) === wizardStep;
+    tab.classList.toggle('active', active);
+    if (active) tab.setAttribute('aria-current', 'step');
+    else tab.removeAttribute('aria-current');
+  });
+  $('wizardPrev').classList.toggle('hidden', wizardStep === 1);
+  $('wizardNext').textContent = wizardStep === 1 ? '下一步：观察复核 →' : wizardStep === 2 ? '下一步：完成卡片 →' : '导出一页 PDF ↗';
+  setWizardNotice(wizardHints[wizardStep - 1]);
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll('.wizard-tab').forEach(tab => tab.addEventListener('click', () => {
+  const target = Number(tab.dataset.step);
+  if (target > 1 && !state.image) { setWizardNotice('请先上传图片，再进入后续步骤。', true); return; }
+  setWizardStep(target);
+}));
+$('wizardPrev').addEventListener('click', () => setWizardStep(wizardStep - 1));
+$('wizardNext').addEventListener('click', () => {
+  if (wizardStep === 3) { $('printBtn').click(); return; }
+  if (wizardStep === 1) {
+    if (!state.image) { setWizardNotice('请先上传壁画原图。', true); return; }
+    if (!$('imageSource').value.trim() || !$('imageLicense').value.trim()) { setWizardNotice('请先填写图片来源和授权范围。', true); return; }
+  }
+  setWizardStep(wizardStep + 1);
+});
+setWizardStep(1);
 
 function syncView() {
   const inWorkbench = location.hash === '#workbench';
@@ -212,6 +254,7 @@ function syncView() {
   $('backHome').classList.toggle('hidden', !inWorkbench);
   $('printBtn').classList.toggle('hidden', !inWorkbench);
   document.body.classList.toggle('landing-mode', !inWorkbench);
+  document.body.classList.toggle('workbench-mode', inWorkbench);
   window.scrollTo(0, 0);
 }
 $('startBtn').addEventListener('click', () => { location.hash = 'workbench'; });
