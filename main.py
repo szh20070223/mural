@@ -7,10 +7,7 @@
 #   python main.py data/images/test_mural1.png
 #   python main.py data/images/test_mural1.png --prompt prompts/vision_analysis.txt
 #
-# 输出说明：
-#   这是 A 阶段的产物——若干"候选区域"，带坐标框。
-#   最终观察卡上只放 1-3 个，由 B 审查官裁决决定；B/C 还没接。
-# =============================================================================
+# 默认执行 A 观察、B 审查和 C 成稿，并由独立渲染器生成观察卡。
 
 import argparse
 from pathlib import Path
@@ -73,6 +70,9 @@ def _print_observation(outcome: dict) -> None:
     print("图片编号：", outcome["image_id"])
     print(f"候选区域：{len(findings)} 个（卡片最终只取 1-3 个，由 B 审查官裁决）")
 
+    batch = outcome.get("candidate_status")
+    if batch and not batch["ready"]:
+        print(f"  补查后可定位 {batch['count']} 处，少于 {batch['minimum']} 处，已保存候选并停止送审。")
     if not findings:
         print("  （模型没有发现值得关注的区域——这是合法结果，不是报错）")
 
@@ -109,7 +109,8 @@ def _print_review(outcome: dict) -> None:
 
     for verdict in review["report"]["verdicts"]:
         line = f"  {verdict['region_id']}  {verdict['decision']:<6} {verdict['reason']}"
-        print(line)
+        route = "人工复核" if verdict["adjusted_confidence"] == "低" else "自动判定"
+        print(f"{line}　{verdict['adjusted_confidence']}置信度 · {route}")
         if verdict.get("adjusted_bbox"):
             box = ", ".join(f"{value:.0%}" for value in verdict["adjusted_bbox"].values())
             print(f"        改框：[{box}]")
@@ -150,7 +151,7 @@ def _print_card(outcome: dict) -> None:
     print("\n" + "=" * 62)
 
     if not card:
-        print("（未生成观察卡：候选被全部剔除，或用了 --no-compose）")
+        print("（本次未生成观察卡）")
         return
 
     print("观察卡")

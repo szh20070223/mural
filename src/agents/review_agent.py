@@ -62,6 +62,7 @@ class ReviewAgent:
                     "bbox": finding.bbox.as_list(),
                     # 把面积换算成数字交给 B。
                     # 不给的话它只能凭"看起来很大"排序，而缩略图上小区域看着都不大。
+                    "initial_parent": finding.parent_region_id,
                     "area_ratio": round(finding.bbox.area_ratio(), 4),
                     "observation": finding.observation,
                     "impact": finding.impact,
@@ -114,8 +115,8 @@ class ReviewAgent:
             "请重新输出，严格遵守给定的 JSON 格式：\n"
             "1. 只返回一个 JSON 对象，不要 Markdown 代码围栏，不要任何解释文字；\n"
             "2. verdicts 必须覆盖候选清单里的**每一条**，region_id 不能新造；\n"
-            "3. decision 只能是 keep、adjust、drop、merge；\n"
-            "4. decision=adjust 必须给出 adjusted_bbox（归一化 [x1,y1,x2,y2]）；\n"
-            "5. decision=merge 必须给出 merge_into，且不能等于自己；\n"
-            "6. 每条都要写 reason，不要只写'证据不足'。"
+            "3. 每条必须给 adjusted_confidence，值只能为高、中、低；类型不清或 defer 时为低。\n"
+            "4. decision 可为 keep、adjust、defer、drop、merge。改类型或 defer 时同时改写观察和影响。\n"
+            "5. merge 仅指同类型同等级且实际重叠的重复候选，直接指向一个保留项。\n"
+            "6. 每条写具体视觉依据。"
         )

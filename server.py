@@ -58,14 +58,19 @@ class Handler(SimpleHTTPRequestHandler):
             finally:
                 image_path.unlink(missing_ok=True)
             card_info = result.get("card")
+            batch = result["candidate_status"]
+            stats = (result.get("review") or {}).get("stats")
+            metadata = {"run_id": result["run_id"], "candidate_status": batch, "review_stats": stats}
             if not card_info:
                 return self.reply(200, {
                     "card": None,
-                    "run_id": result["run_id"],
-                    "message": "分析已完成，但没有可确认的关注区域。请人工检查原图，必要时自行标记。",
+                    **metadata,
+                    "message": (f"A 补查后有 {batch['count']} 处可定位候选，未达到 {batch['minimum']} 处，已停止送审。"
+                                if batch and not batch["ready"]
+                                else "本次没有可上卡的关注区域，请对照原图检查。"),
                 })
             card = json.loads(Path(card_info["json_path"]).read_text(encoding="utf-8"))
-            return self.reply(200, {"card": card, "run_id": result["run_id"]})
+            return self.reply(200, {"card": card, **metadata})
         except (ValueError, KeyError, binascii.Error, json.JSONDecodeError) as exc:
             return self.reply(400, {"error": f"请求数据无效：{exc}"})
         except Exception as exc:

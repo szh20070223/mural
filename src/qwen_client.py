@@ -158,9 +158,9 @@ class QwenClient:
         crop = photo.crop(box)
 
         scale = min(4.0, max_side / max(crop.size))
-        if scale > 1:
+        if scale != 1:
             crop = crop.resize(
-                (int(crop.width * scale), int(crop.height * scale)), Image.LANCZOS
+                (max(1, round(crop.width * scale)), max(1, round(crop.height * scale))), Image.LANCZOS
             )
 
         buffer = io.BytesIO()

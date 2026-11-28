@@ -275,7 +275,7 @@ def render_card(card: Card, image_path: str | Path, out_pdf: str | Path) -> Path
         # 放右边会孤零零地飘着，看起来像另一栏的东西）
         # 待复核的类型用"（待复核）"后缀，而不是把它换成"待判读"——
         # 读者需要知道我们倾向于是什么，也需要知道这个倾向还没核实。
-        label = region.disease + ("（待复核）" if region.pending_review else "")
+        label = region.disease + ("（人工复核）" if region.pending_review else "")
         title_text = f"{region.region_id}　{label}"
         title_font = _font(32, bold=True)
         draw.text((MARGIN + 30, block_top - 4), title_text, font=title_font, fill=COLOR_TEXT)

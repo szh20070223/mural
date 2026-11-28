@@ -20,15 +20,9 @@
 #   - 下游（渲染器 / 报告 / 视频）只认 Card，不认 Observation 和旧版。
 #
 # 分层（从中间产物到最终交付物）：
-#   A 观察官 ──> Observation（中间产物，允许 5 个候选、允许没框）
-#                    │
-#   B 审查官 ──> 裁决、合并、剔除 ──┐
-#                                    ▼
-#   C 成稿   ──> Card（最终交付物，1-3 个区域 + 建议 + 来源 + 归属）
-#
-# 现在代码里的现实是：A 还只输出旧版 AnalysisResult（没有框）。
-# 所以旧版先留着保证 demo 能跑，等 B 接上之后再统一迁到 Observation。
-# 旧版上面已经写了醒目的注释，别在新代码里继续用它。
+#   A → Observation（初检/补查候选），B → ReviewReport（逐条分级和裁决）。
+#   入选的 1–3 个区域交给 C 成稿，最后组装 Card。
+#   旧版无框 AnalysisResult 仅用于回看和提示词对照。
 # =============================================================================
 
 from typing import Annotated, Literal
@@ -85,6 +79,8 @@ DISEASE_ALIASES: dict[str, str] = {
     "网状裂隙": "裂隙",
     "起翘": "起甲",
     "颜料层起甲": "起甲",
+    "颜色层脱落": "颜料层脱落",
+    "待判断": "待判读",
     "颜料脱落": "颜料层脱落",
     "颜色脱落": "颜料层脱落",
     "剥落": "颜料层脱落",
@@ -265,7 +261,7 @@ class BoundingBox(BaseModel):
 class ObservedRegion(BaseModel):
     """A 观察官吐出的一个候选区域。
 
-    和最终的 Region 的区别：这里允许最多 6 个、允许低置信度，
+    和最终的 Region 的区别：一批最多 10 个，允许低置信度，
     因为 A 的职责是"尽量别漏"，B 的职责才是"砍到只剩站得住的"。
     如果把 A 也限制成 3 个，等于让模型在只看一次的情况下就做取舍，
     那是审查官该干的事，不是观察官该干的事。
@@ -274,6 +270,8 @@ class ObservedRegion(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     region_id: str = Field(pattern=r"^C([1-9]|1[0-2])$", description="候选编号 C1-C10")
+    parent_region_id: str | None = Field(default=None, pattern=r"^C([1-9]|1[0-2])$",
+                                         description="拆分来源，引用初检阶段的编号")
     disease: ObservationDisease
     bbox: BoundingBox
     observation: str = Field(
@@ -361,7 +359,7 @@ class ReviewVerdict(BaseModel):
     adjusted_bbox: BoundingBox | None = None
     # 改判病害类型时才填。拿不准就留空，在 reason 里说明
     adjusted_disease: ObservationDisease | None = None
-    # 调高或调低置信度时才填
+    # 新运行要求 B 对全部候选显式分级。可空用于读取历史审查文件。
     adjusted_confidence: RegionConfidence | None = None
     # merge 时必填：合并到哪一个候选
     merge_into: str | None = Field(
@@ -493,17 +491,13 @@ class Region(BaseModel):
 
     confidence: RegionConfidence
 
-    # 类型有倾向、但还没核实。卡片上显示为"颜料层脱落（待复核）"。
-    #
-    # 和 disease="待判读" 的区别（这两个不要混）：
-    #   "待判读"    = 连倾向都没有，我们不知道它是什么；
-    #   X（待复核） = 倾向于 X，但证据不足以确认。
-    # 前者占一个区域却什么信息都不给；后者既保留判断、又标注了不确定性。
-    # 审查员用 defer 时，如果第一位观察员给过类型，就会走到这里。
-    pending_review: bool = Field(
-        default=False,
-        description="True 表示类型存疑，卡片上会加'（待复核）'后缀",
-    )
+    pending_review: bool = Field(default=False, description="低置信度区域需要人工复核")
+
+    @model_validator(mode="after")
+    def _flag_low_confidence(self) -> "Region":
+        if self.confidence == "低" or self.disease == "待判读":
+            self.pending_review = True
+        return self
 
     review_notes: list[str] = Field(
         default_factory=list,

@@ -2,22 +2,8 @@
 # =============================================================================
 # 编排：一次完整运行的流程
 # =============================================================================
-# 现在的流程（A + B）：
-#   读图
-#     -> A 观察官：找出最多 6 个候选区域（带坐标框）
-#     -> B 审查官：看着原图逐条裁决，砍到 1-3 个
-#     -> 确定性后处理：合并重叠、截断、重新编号
-#     -> 落盘 + 写日志
-#
-# 还差 C（建议）和渲染（一页 PDF）。接的时候直接在 B 后面插一步就行，
-# 所以这里刻意保持线性、每一步一个函数调用。
-#
-# 自修复重试：
-#   模型偶尔会输出不能解析的内容（多写一段解释、坐标越界、漏掉字段）。
-#   直接报错让演示中断是最差的选择。这里给它第二次机会，
-#   而且是把"它自己上一次的输出 + 具体错在哪"一起喂回去——
-#   重新问一遍它大概率还是同样的错。
-# =============================================================================
+# A 做全图初检和按需局部补查；B 逐候选分级并选展示项；C 接收选定区域成稿。
+# 模型格式错误可携带具体错误重试一次。卡片渲染由单独的 render 模块执行。
 
 from __future__ import annotations
 
@@ -32,6 +18,7 @@ from src.agents.report_agent import ReportAgent
 from src.agents.review_agent import ReviewAgent
 from src.agents.vision_agent import VisionAgent
 from src.card_builder import build_card
+from src.candidate_refinement import MIN_CANDIDATES, apply_refinement, initial_candidates
 from src.config import (
     CARD_DIR,
     OBSERVATION_DIR,
@@ -249,11 +236,20 @@ def run_vision_workflow(
     # ---- 3. A：观察 ----
     # _run_with_retry 返回 (解析结果, 回执, 尝试次数)，
     # 而 parse_any 本身返回的是 (阶段, 对象, 元信息)，所以要解两层。
+    def parse_initial(text):
+        stage, result, meta = parse_any(text)
+        if stage == "observation":
+            result = initial_candidates(result)
+            meta.kept = len(result.findings)
+        elif review and agent.prompt_path.name != "vision_analysis.txt":
+            raise ValueError("本次审查需要带 bbox 的候选区域")
+        return stage, result, meta
+
     parsed, a_reply, a_attempts = _run_with_retry(
         trace=trace,
         stage="a",
         call=lambda history: agent.run(path, history=history),
-        parse=parse_any,
+        parse=parse_initial,
         correction=agent.correction_message,
         raw_stem=image_id,
     )
@@ -272,6 +268,29 @@ def run_vision_workflow(
 
     # 以本地文件名为准：模型可能把 image_id 写成中文描述或带扩展名
     observation_or_analysis.image_id = image_id
+
+    candidate_status = None
+    if stage == "observation":
+        initial = observation_or_analysis
+        initial_count = len(initial.findings)
+        refinement_attempts = 0
+        if initial_count < MIN_CANDIDATES:
+            OBSERVATION_DIR.mkdir(parents=True, exist_ok=True)
+            (OBSERVATION_DIR / f"{image_id}.initial.json").write_text(
+                initial.model_dump_json(indent=2), encoding="utf-8"
+            )
+            observation_or_analysis, _, refinement_attempts = _run_with_retry(
+                trace=trace, stage="a_refine", raw_stem=f"{image_id}.refine",
+                call=lambda history: agent.refine(path, initial, history),
+                parse=lambda text: apply_refinement(initial, text, (width, height)),
+                correction=lambda error: f"请更正补查 JSON：{error}。仅输出新增条目，证据不足可以少给。",
+            )
+        count = len(observation_or_analysis.findings)
+        candidate_status = {
+            "initial": initial_count, "count": count, "minimum": MIN_CANDIDATES,
+            "refinement_attempts": refinement_attempts, "ready": count >= MIN_CANDIDATES,
+        }
+        trace.log("candidate_batch", **candidate_status)
 
     # ---- 4. 落盘 A 的结果 ----
     if stage == "observation":
@@ -297,9 +316,8 @@ def run_vision_workflow(
     if review and stage == "observation":
         observation = observation_or_analysis
 
-        if not observation.findings:
-            # A 什么都没找到，B 没有可裁的东西，不用花这次钱
-            trace.log("review_skipped", reason="no_candidates")
+        if not candidate_status["ready"]:
+            trace.log("review_skipped", reason="insufficient_candidates", **candidate_status)
         else:
             reviewer = ReviewAgent(client, prompt_path=review_prompt_file)
 
@@ -336,6 +354,15 @@ def run_vision_workflow(
             regions, stats = apply_verdicts(observation, review_report)
             final_regions = regions
 
+            # 每条保留 B 的实际分级、复核去向和上卡编号，包括未入选的低档项。
+            card_ids = dict(zip(stats.selected_ids, (r.region_id for r in regions)))
+            decisions = [
+                {"candidate_id": v.region_id, "confidence": v.adjusted_confidence,
+                 "pending_review": v.adjusted_confidence == "低", "decision": v.decision,
+                 "card_region_id": card_ids.get(v.region_id)}
+                for v in review_report.verdicts
+            ]
+
             # 把"候选 → 裁决 → 最终区域"的完整映射单独落一份，
             # 和原始裁决分开存：原始裁决是模型说的，这份是代码处理后的，
             # 两者放在一起才解释得清"为什么最后剩这三条"。
@@ -346,6 +373,7 @@ def run_vision_workflow(
                         "report": json.loads(review_report.model_dump_json()),
                         "regions": [json.loads(region.model_dump_json()) for region in regions],
                         "stats": asdict(stats),
+                        "decisions": decisions,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -369,6 +397,7 @@ def run_vision_workflow(
                 "stats": asdict(stats),
                 "output_path": str(review_path),
                 "applied_path": str(applied_path),
+                "decisions": decisions,
             }
 
     # ---- 6. C：成稿 + 组装卡片 + 渲染 ----
@@ -471,10 +500,10 @@ def run_vision_workflow(
     # ---- 7. 收尾 ----
     trace.log(
         "run_end",
-        ok=True,
+        ok=candidate_status is None or candidate_status["ready"],
         stage=stage,
         output_path=str(output_path),
-        regions=len(final_regions) if final_regions else len(observation_or_analysis.findings),
+        regions=len(final_regions),
         review_ran=review_payload is not None,
         card_built=card_payload is not None,
         a_attempts=a_attempts,
@@ -487,6 +516,7 @@ def run_vision_workflow(
         "attempts": a_attempts,
         "result": json.loads(observation_or_analysis.model_dump_json()),
         "meta": asdict(meta),
+        "candidate_status": candidate_status,
         "output_path": str(output_path),
         "trace_path": str(trace.path),
         "run_id": trace.run_id,

@@ -17,7 +17,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from src.config import VISION_PROMPT_PATH
+from src.config import PROJECT_ROOT, VISION_PROMPT_PATH
+from src.candidate_refinement import split_parents
+from src.schemas import Observation
 from src.qwen_client import ModelReply, QwenClient
 from src.trace import sha256_short
 
@@ -69,6 +71,14 @@ class VisionAgent:
 
         return self.client.analyze_image(str(path), prompt, history=history)
 
+    def refine(self, image_path: Path, initial: Observation, history=None) -> ModelReply:
+        parents = split_parents(initial)
+        instructions = (PROJECT_ROOT / "prompts" / "vision_refine.txt").read_text(encoding="utf-8")
+        prompt = (instructions + "\n初检清单：" + initial.model_dump_json(exclude_none=True)
+                  + "\n父框（由大到小）：" + (", ".join(parents) or "无，仅补查独立异常"))
+        return self.client.analyze_image(str(image_path), prompt, history=history,
+                                         crops=[(key, f.bbox) for key, f in parents.items()])
+
     def correction_message(self, error: str) -> str:
         """生成"你上次输出不合格，请重来"的纠正说明。
 
@@ -84,7 +94,7 @@ class VisionAgent:
             "1. 只返回一个 JSON 对象，不要 Markdown 代码围栏，不要任何解释文字；\n"
             "2. findings 里每个区域都必须带 bbox（归一化 [x1, y1, x2, y2]），"
             "且 x1 < x2、y1 < y2；\n"
-            "3. disease 只能使用给定的 8 个名称之一；\n"
+            "3. disease 只能使用给定的 8 个名称之一或待判读；\n"
             "4. 如果这张图确实没有值得关注的区域，findings 返回空列表 []，"
             "不要为了填满而虚构。"
         )

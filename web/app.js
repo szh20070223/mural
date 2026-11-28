@@ -73,6 +73,19 @@ $('markerLayer').addEventListener('pointerup', (event) => {
   renderMarkers();
 });
 
+function markerFromRegion(region) {
+  const box = region.bbox;
+  const [x1, y1, x2, y2] = Array.isArray(box) ? box : [box.x1, box.y1, box.x2, box.y2];
+  const pending = region.pending_review || region.confidence === '低';
+  return {
+    x: x1 * 100, y: y1 * 100, w: (x2 - x1) * 100, h: (y2 - y1) * 100,
+    phenomenon: `${region.disease}：${region.observation}`,
+    evidence: [region.impact, ...(region.review_notes || [])].filter(Boolean).join('；'),
+    gradeLabel: `${region.confidence}置信度${pending ? ' · 人工复核' : ''}`,
+    status: pending ? '人工复核' : '自动判定',
+  };
+}
+
 function markerElement(marker, index, clickable = false) {
   const el = document.createElement('div');
   el.className = 'marker';
@@ -99,7 +112,8 @@ function renderFindings() {
   if (!state.markers.length) { list.innerHTML = '<div class="empty-list">标记区域后，在这里填写观察现象和依据。</div>'; return; }
   state.markers.forEach((m, i) => {
     const card = document.createElement('div'); card.className = 'finding';
-    card.innerHTML = `<div class="finding-title"><strong>区域 ${i + 1}</strong><button type="button" class="text-button remove">移除</button></div><label>观察现象<input id="phenomenon-${i}" placeholder="如：线条中断、局部颜色变浅"></label><label>图像依据<input placeholder="说明能从原图看到什么"></label><label>判断等级<select><option>疑似发现</option><option>明确发现</option><option>无法判断</option></select></label>`;
+    card.innerHTML = `<div class="finding-title"><strong>区域 ${i + 1}</strong><button type="button" class="text-button remove">移除</button></div><label>观察现象<input id="phenomenon-${i}" placeholder="如：线条中断、局部颜色变浅"></label><label>图像依据<input placeholder="说明能从原图看到什么"></label><label>判断等级<select><option>自动判定</option><option>人工复核</option><option>疑似发现</option><option>明确发现</option><option>无法判断</option></select></label>`;
+    if (m.gradeLabel) card.querySelector('strong').textContent = `区域 ${i + 1} · ${m.gradeLabel}`;
     const inputs = card.querySelectorAll('input');
     inputs[0].value = m.phenomenon; inputs[1].value = m.evidence; card.querySelector('select').value = m.status;
     inputs[0].addEventListener('input', e => m.phenomenon = e.target.value);
@@ -118,17 +132,23 @@ $('analyzeBtn').addEventListener('click', async () => {
     setMessage('请先填写图片来源和授权范围。', true);
     return;
   }
+  const analyzedImage = state.image;
   $('analyzeBtn').disabled = true; $('modelState').textContent = '分析中';
   setMessage('正在调用模型，请稍候。');
   try {
     const response = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mime: state.image.mime, image: state.image.dataUrl.split(',')[1], image_source: $('imageSource').value, image_license: $('imageLicense').value, scene_note: $('sceneNote').value }) });
     const data = await response.json();
+    if (state.image !== analyzedImage) return;
     if (!response.ok) throw new Error(data.error || '模型调用失败');
     state.runId = data.run_id || null;
     $('runInfo').textContent = state.runId ? `运行编号：${state.runId}` : '';
     $('runInfo').classList.toggle('hidden', !state.runId);
     $('reviewConfirmed').checked = false;
     if (!data.card) {
+      if (state.result) {
+        state.markers = [];
+        for (const id of ['summary', 'limitations', 'advice1', 'advice2', 'toolSource']) $(id).value = '';
+      }
       state.result = null;
       $('modelFindings').replaceChildren();
       $('modelFindings').classList.add('hidden');
@@ -144,23 +164,18 @@ $('analyzeBtn').addEventListener('click', async () => {
     $('advice1').value = card.recommendations?.[0] ? `${card.recommendations[0].action}。依据：${card.recommendations[0].basis}。风险：${card.recommendations[0].risk}` : '';
     $('advice2').value = card.recommendations?.[1] ? `${card.recommendations[1].action}。依据：${card.recommendations[1].basis}。风险：${card.recommendations[1].risk}` : '';
     $('toolSource').value = [...(card.provenance?.models || []), ...(card.provenance?.tools || [])].join('；');
-    state.markers = (card.regions || []).slice(0, 3).map(region => ({
-      x: region.bbox[0] * 100, y: region.bbox[1] * 100,
-      w: (region.bbox[2] - region.bbox[0]) * 100,
-      h: (region.bbox[3] - region.bbox[1]) * 100,
-      phenomenon: `${region.disease}：${region.observation}`,
-      evidence: `${region.impact}；复核：${(region.review_notes || []).join('、')}`,
-      status: '疑似发现',
-    }));
+    state.markers = (card.regions || []).slice(0, 3).map(markerFromRegion);
     renderMarkers(); syncSheet();
     $('modelState').textContent = '待人工复核';
     const relevant = card.regions || [];
-    setMessage(`已生成 ${relevant.length} 个带坐标的关注区域。请核对原图标框、说明、建议和来源。`);
+    const stats = data.review_stats;
+    const counts = stats ? `B 已分级 ${stats.proposed} 处（高 ${stats.grades['高']}、中 ${stats.grades['中']}、低 ${stats.grades['低']}）。` : '';
+    setMessage(`${counts}按病害类型与置信度去重后展示 ${relevant.length} 处。`);
     const suggestions = $('modelFindings'); suggestions.replaceChildren();
-    relevant.forEach(x => { const p = document.createElement('p'); p.textContent = `${x.region_id} · ${x.disease} · 置信度${x.confidence}：${x.observation}`; suggestions.append(p); });
+    relevant.forEach(x => { const p = document.createElement('p'); p.textContent = `${x.region_id} · ${x.disease} · 置信度${x.confidence} · ${x.pending_review || x.confidence === '低' ? '人工复核' : '自动判定'}：${x.observation}`; suggestions.append(p); });
     suggestions.classList.toggle('hidden', !relevant.length);
-  } catch (error) { $('modelState').textContent = '调用失败'; setMessage(error.message, true); }
-  finally { $('analyzeBtn').disabled = false; }
+  } catch (error) { if (state.image !== analyzedImage) return; $('modelState').textContent = '调用失败'; setMessage(error.message, true); }
+  finally { if (state.image === analyzedImage) $('analyzeBtn').disabled = false; }
 });
 
 function textLine(parent, value, className = '') { const p = document.createElement('p'); p.className = className; p.textContent = value || '待填写'; parent.append(p); }
@@ -168,7 +183,7 @@ function syncSheet() {
   $('sheetSummary').textContent = $('summary').value || '待填写总体观察摘要。';
   $('sheetLimitations').textContent = $('limitations').value || '待填写不确定性与人工复核提示。';
   const findings = $('sheetFindings'); findings.replaceChildren();
-  state.markers.forEach((m, i) => { const block = document.createElement('div'); block.className = 'sheet-finding'; textLine(block, `${i+1}. ${m.phenomenon || '待填写观察现象'}（${m.status}）`, 'sheet-finding-title'); textLine(block, `依据：${m.evidence || '待填写原图依据'}`); findings.append(block); });
+  state.markers.forEach((m, i) => { const block = document.createElement('div'); block.className = 'sheet-finding'; textLine(block, `${i+1}. ${m.phenomenon || '待填写观察现象'}${m.gradeLabel ? ' · ' + m.gradeLabel : ''}${m.status === '人工复核' && m.gradeLabel?.includes('人工复核') ? '' : '（' + m.status + '）'}`, 'sheet-finding-title'); textLine(block, `依据：${m.evidence || '待填写原图依据'}`); findings.append(block); });
   const advice = $('sheetAdvice'); advice.replaceChildren();
   [$('advice1').value, $('advice2').value].filter(Boolean).forEach((x, i) => textLine(advice, `${i+1}. ${x}`));
   if (!advice.children.length) textLine(advice, '待填写建议、依据与风险。');

@@ -30,6 +30,7 @@
       "observation": "右上青绿区域深浅不均、局部发白变淡，土黄底色存在色斑过渡。",
       "impact": "色彩层次难以还原，影响数字展示时的原色复原判断。",
       "confidence": "低",
+      "pending_review": true,
       "review_notes": ["对照同窟同期图像确认原色", "排除拍摄白平衡造成的偏色"],
       "ai_generated": true
     }
