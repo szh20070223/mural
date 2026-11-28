@@ -4,21 +4,29 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>壁画智护 · AI 壁画观察卡</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=2">
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><span class="brand-mark">壁</span><span>壁画智护 <small>AI 壁画观察工作台</small></span></div>
-    <div class="top-actions"><span class="phase">线上赛 · 观察卡</span><button id="printBtn" class="primary" type="button">导出一页 PDF</button></div>
+    <div class="top-actions"><span class="phase">线上赛 · 观察卡</span><button id="backHome" class="back-home hidden" type="button">← 返回首页</button><button id="printBtn" class="primary hidden" type="button">导出一页 PDF</button></div>
   </header>
 
   <main class="workspace">
-    <section class="hero">
-      <p class="eyebrow">MURAL OBSERVATION STUDIO</p>
-      <h1>从原图出发，留下每一步判断依据。</h1>
-      <p>上传壁画图片，调用视觉模型辅助观察，再由你确认区域、修订结论并生成参赛观察卡。</p>
+    <section id="landing" class="landing">
+      <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">MURAL CONSERVATION · DIGITAL OBSERVATION</p>
+        <h1>让千年色彩，<br><em>被认真看见。</em></h1>
+        <p>从壁画原图出发，借助 AI 发现线索，由人确认每一处判断。完成一张有依据、可复核的壁画观察卡。</p>
+        <button id="startBtn" class="hero-link" type="button">开始观察 <span aria-hidden="true">↗</span></button>
+      </div>
+      <div class="hero-art" aria-hidden="true"><span class="hero-sun"></span><span class="hero-ridge ridge-back"></span><span class="hero-ridge ridge-front"></span><span class="hero-medallion">✦</span><span class="hero-art-caption">敦煌色谱 · 数字观察</span></div>
+      </section>
     </section>
 
+    <section id="workbench" class="workbench-view hidden">
+    <div class="workbench-heading"><span>OBSERVATION WORKBENCH</span><p>一幅原图 · 三步形成观察卡</p></div>
     <div class="columns">
       <section class="panel image-panel">
         <div class="section-head"><div><span class="step">01</span><h2>原图与关注区域</h2></div><span id="markerCount" class="subtle">0 / 3 处</span></div>
@@ -52,6 +60,7 @@
       <label class="review-confirm"><input id="reviewConfirmed" type="checkbox"> 我已对照原图复核关注区域、文字结论及来源</label>
       <p class="hint">确认后可使用浏览器打印，并选择“另存为 PDF”。</p>
     </section>
+    </section>
   </main>
 
   <section id="printSheet" class="print-sheet" aria-label="AI 壁画观察卡">
@@ -60,6 +69,6 @@
     <div class="sheet-bottom"><div><h2>建议与依据</h2><div id="sheetAdvice"></div></div><div><h2>不确定性 · 人工复核</h2><p id="sheetLimitations"></p></div></div>
     <div class="sheet-footer"><p id="sheetImageSource"></p><p id="sheetSceneNote"></p><p id="sheetToolSource"></p><p id="sheetReferenceSource"></p><p id="sheetRunInfo"></p><p id="sheetReviewState"></p><p>本卡为 AI 辅助图像观察与方案表达，不作为专业鉴定或修复施工依据。</p></div>
   </section>
-  <script src="/app.js"></script>
+  <script src="/app.js?v=2"></script>
 </body>
 </html>

@@ -204,3 +204,17 @@ $('printBtn').addEventListener('click', () => {
   syncSheet(); window.print();
 });
 syncSheet();
+
+function syncView() {
+  const inWorkbench = location.hash === '#workbench';
+  $('landing').classList.toggle('hidden', inWorkbench);
+  $('workbench').classList.toggle('hidden', !inWorkbench);
+  $('backHome').classList.toggle('hidden', !inWorkbench);
+  $('printBtn').classList.toggle('hidden', !inWorkbench);
+  document.body.classList.toggle('landing-mode', !inWorkbench);
+  window.scrollTo(0, 0);
+}
+$('startBtn').addEventListener('click', () => { location.hash = 'workbench'; });
+$('backHome').addEventListener('click', () => { location.hash = 'home'; });
+window.addEventListener('hashchange', syncView);
+syncView();
