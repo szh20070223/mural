@@ -189,6 +189,7 @@ async function exportPdf() {
       reviewConfirmed: true, runId: state.runId };
     fields.forEach(id => { payload[id] = $(id).value; });
     const response = await fetch('/api/export-pdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (response.status === 404) throw new Error('当前服务没有 PDF 导出接口。请停止旧的 server.py，更新仓库后重新启动，再刷新页面。');
     if (!response.ok) { const error = await response.json(); throw new Error(error.error || 'PDF 生成失败'); }
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement('a');
