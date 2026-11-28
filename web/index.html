@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>壁画智护 · AI 壁画观察卡</title>
-  <link rel="stylesheet" href="/styles.css?v=3">
+  <link rel="stylesheet" href="/styles.css?v=4">
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><span class="brand-mark">壁</span><span>壁画智护 <small>AI 壁画观察工作台</small></span></div>
-    <div class="top-actions"><span class="phase">线上赛 · 观察卡</span><button id="backHome" class="back-home hidden" type="button">← 返回首页</button><button id="printBtn" class="primary hidden" type="button">导出一页 PDF</button></div>
+    <div class="top-actions"><span class="phase">线上赛 · 观察卡</span><button id="backHome" class="back-home hidden" type="button">← 返回首页</button><button id="exportBtn" class="primary hidden" type="button">导出一页 PDF</button></div>
   </header>
 
   <main class="workspace">
@@ -65,18 +65,12 @@
       <div class="advice-grid"><label class="field">建议一<textarea id="advice1" rows="3" placeholder="保护、数字展示或公众传播建议；写明依据和风险。"></textarea></label><label class="field">建议二（可选）<textarea id="advice2" rows="3" placeholder="第二条建议及其依据、可能风险。"></textarea></label></div>
       <div class="source-grid"><label class="field">模型与工具来源<input id="toolSource" placeholder="例如：千问视觉模型；本项目网页工作台"></label><label class="field">公开资料来源（可选）<input id="referenceSource" placeholder="列明实际引用的资料；未引用可写“无”"></label></div>
       <label class="review-confirm"><input id="reviewConfirmed" type="checkbox"> 我已对照原图复核关注区域、文字结论及来源</label>
-      <p class="hint">确认后可使用浏览器打印，并选择“另存为 PDF”。</p>
+      <p class="hint">确认后点击导出，即可直接下载一页 PDF 观察卡。</p>
     </section>
     <div class="wizard-footer"><span id="wizardStatus" role="status" aria-live="polite">先上传壁画原图，并填写来源与授权。</span><div><button id="wizardPrev" type="button" class="wizard-secondary hidden">← 上一步</button><button id="wizardNext" type="button" class="wizard-primary">下一步：观察复核 →</button></div></div>
     </section>
   </main>
 
-  <section id="printSheet" class="print-sheet" aria-label="AI 壁画观察卡">
-    <div class="sheet-heading"><div><span>壁画智护 / AI MURAL OBSERVATION</span><h1>AI 壁画观察卡</h1></div><span>线上赛 · AI 辅助草稿</span></div>
-    <div class="sheet-main"><div class="sheet-image"><div class="sheet-image-wrap"><img id="sheetImage" alt="壁画原图"><div id="sheetMarkers" class="sheet-markers"></div></div><p>原图与关注区域（数字为区域编号）</p></div><div class="sheet-observations"><h2>图像观察</h2><p id="sheetSummary"></p><div id="sheetFindings"></div></div></div>
-    <div class="sheet-bottom"><div><h2>建议与依据</h2><div id="sheetAdvice"></div></div><div><h2>不确定性 · 人工复核</h2><p id="sheetLimitations"></p></div></div>
-    <div class="sheet-footer"><p id="sheetImageSource"></p><p id="sheetSceneNote"></p><p id="sheetToolSource"></p><p id="sheetReferenceSource"></p><p id="sheetRunInfo"></p><p id="sheetReviewState"></p><p>本卡为 AI 辅助图像观察与方案表达，不作为专业鉴定或修复施工依据。</p></div>
-  </section>
-  <script src="/app.js?v=3"></script>
+  <script src="/app.js?v=4"></script>
 </body>
 </html>

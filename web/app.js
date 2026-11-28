@@ -25,7 +25,6 @@ function loadImage(file) {
     $('runInfo').classList.add('hidden');
     $('reviewConfirmed').checked = false;
     $('muralImage').src = reader.result;
-    $('sheetImage').src = reader.result;
     $('emptyImage').classList.add('hidden');
     $('imageStage').classList.remove('hidden');
     $('dropZone').classList.add('loaded');
@@ -99,7 +98,6 @@ function markerElement(marker, index, clickable = false) {
 
 function renderMarkers() {
   $('markerLayer').replaceChildren(...state.markers.map((m, i) => markerElement(m, i, true)));
-  $('sheetMarkers').replaceChildren(...state.markers.map((m, i) => markerElement(m, i)));
   if (state.drag) {
     const a = state.drag.start, b = state.drag.current;
     $('markerLayer').append(markerElement({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x-b.x), h: Math.abs(a.y-b.y) }, state.markers.length));
@@ -156,7 +154,6 @@ $('analyzeBtn').addEventListener('click', async () => {
       $('modelFindings').classList.add('hidden');
       $('modelState').textContent = '待人工检查';
       setMessage(data.message || '分析完成，暂无可确认的关注区域。');
-      syncSheet();
       return;
     }
     const card = data.card;
@@ -167,7 +164,7 @@ $('analyzeBtn').addEventListener('click', async () => {
     $('advice2').value = card.recommendations?.[1] ? `${card.recommendations[1].action}。依据：${card.recommendations[1].basis}。风险：${card.recommendations[1].risk}` : '';
     $('toolSource').value = [...(card.provenance?.models || []), ...(card.provenance?.tools || [])].join('；');
     state.markers = (card.regions || []).slice(0, 3).map(markerFromRegion);
-    renderMarkers(); syncSheet();
+    renderMarkers();
     $('modelState').textContent = '待人工复核';
     const relevant = card.regions || [];
     const stats = data.review_stats;
@@ -180,32 +177,29 @@ $('analyzeBtn').addEventListener('click', async () => {
   finally { if (state.image === analyzedImage) $('analyzeBtn').disabled = false; }
 });
 
-function textLine(parent, value, className = '') { const p = document.createElement('p'); p.className = className; p.textContent = value || '待填写'; parent.append(p); }
-function syncSheet() {
-  $('sheetSummary').textContent = $('summary').value || '待填写总体观察摘要。';
-  $('sheetLimitations').textContent = $('limitations').value || '待填写不确定性与人工复核提示。';
-  const findings = $('sheetFindings'); findings.replaceChildren();
-  state.markers.forEach((m, i) => { const block = document.createElement('div'); block.className = 'sheet-finding'; textLine(block, `${i+1}. ${m.phenomenon || '待填写观察现象'}${m.gradeLabel ? ' · ' + m.gradeLabel : ''}${m.status === '人工复核' && m.gradeLabel?.includes('人工复核') ? '' : '（' + m.status + '）'}`, 'sheet-finding-title'); textLine(block, `依据：${m.evidence || '待填写原图依据'}`); findings.append(block); });
-  const advice = $('sheetAdvice'); advice.replaceChildren();
-  [$('advice1').value, $('advice2').value].filter(Boolean).forEach((x, i) => textLine(advice, `${i+1}. ${x}`));
-  if (!advice.children.length) textLine(advice, '待填写建议、依据与风险。');
-  $('sheetImageSource').textContent = `图片：${$('imageSource').value || '待填写来源'}；授权：${$('imageLicense').value || '待填写授权范围'}`;
-  $('sheetSceneNote').textContent = `场景说明：${$('sceneNote').value || '无'}`;
-  $('sheetToolSource').textContent = `AI／工具：${$('toolSource').value || '待填写模型与工具来源'}`;
-  $('sheetReferenceSource').textContent = `公开资料：${$('referenceSource').value || '无'}`;
-  $('sheetRunInfo').textContent = state.runId ? `模型运行编号：${state.runId}` : '未调用模型；观察内容由人工填写。';
-  $('sheetReviewState').textContent = $('reviewConfirmed').checked ? '人工复核：已确认本卡内容。' : '人工复核：待确认。';
-  renderMarkers();
-}
-fields.forEach(id => $(id).addEventListener('input', syncSheet));
-$('reviewConfirmed').addEventListener('change', syncSheet);
-$('printBtn').addEventListener('click', () => {
+async function exportPdf() {
   if (!state.image) { setWizardStep(1); setWizardNotice('请先上传图片。', true); return; }
   if (!$('imageSource').value.trim() || !$('imageLicense').value.trim()) { setWizardStep(1); setWizardNotice('请先填写图片来源与授权范围。', true); return; }
   if (!$('reviewConfirmed').checked) { setWizardStep(3); setWizardNotice('请先对照原图复核，并勾选人工复核确认。', true); return; }
-  syncSheet(); window.print();
-});
-syncSheet();
+  const button = $('exportBtn');
+  button.disabled = true;
+  setWizardNotice('正在生成 PDF…');
+  try {
+    const payload = { mime: state.image.mime, image: state.image.dataUrl.split(',')[1], markers: state.markers,
+      reviewConfirmed: true, runId: state.runId };
+    fields.forEach(id => { payload[id] = $(id).value; });
+    const response = await fetch('/api/export-pdf', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (!response.ok) { const error = await response.json(); throw new Error(error.error || 'PDF 生成失败'); }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = url; link.download = '壁画观察卡.pdf';
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    setWizardNotice('PDF 已生成，下载即将开始。');
+  } catch (error) { setWizardNotice(error.message || 'PDF 导出失败', true); }
+  finally { button.disabled = false; }
+}
+$('exportBtn').addEventListener('click', exportPdf);
 
 let wizardStep = 1;
 const wizardHints = [
@@ -238,7 +232,7 @@ document.querySelectorAll('.wizard-tab').forEach(tab => tab.addEventListener('cl
 }));
 $('wizardPrev').addEventListener('click', () => setWizardStep(wizardStep - 1));
 $('wizardNext').addEventListener('click', () => {
-  if (wizardStep === 3) { $('printBtn').click(); return; }
+  if (wizardStep === 3) { $('exportBtn').click(); return; }
   if (wizardStep === 1) {
     if (!state.image) { setWizardNotice('请先上传壁画原图。', true); return; }
     if (!$('imageSource').value.trim() || !$('imageLicense').value.trim()) { setWizardNotice('请先填写图片来源和授权范围。', true); return; }
@@ -252,7 +246,7 @@ function syncView() {
   $('landing').classList.toggle('hidden', inWorkbench);
   $('workbench').classList.toggle('hidden', !inWorkbench);
   $('backHome').classList.toggle('hidden', !inWorkbench);
-  $('printBtn').classList.toggle('hidden', !inWorkbench);
+  $('exportBtn').classList.toggle('hidden', !inWorkbench);
   document.body.classList.toggle('landing-mode', !inWorkbench);
   document.body.classList.toggle('workbench-mode', inWorkbench);
   window.scrollTo(0, 0);

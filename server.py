@@ -5,10 +5,12 @@ import binascii
 import json
 import os
 import tempfile
+from io import BytesIO
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from dotenv import load_dotenv
+from PIL import Image, UnidentifiedImageError
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -21,6 +23,8 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(WEB), **kwargs)
 
     def do_POST(self):
+        if self.path == "/api/export-pdf":
+            return self.export_pdf()
         if self.path != "/api/analyze":
             return self.reply(404, {"error": "接口不存在"})
         try:
@@ -75,6 +79,49 @@ class Handler(SimpleHTTPRequestHandler):
             return self.reply(400, {"error": f"请求数据无效：{exc}"})
         except Exception as exc:
             return self.reply(500, {"error": f"分析失败：{exc}"})
+
+    def export_pdf(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= MAX_BODY:
+                return self.reply(413, {"error": "图片过大，最大 10 MB"})
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict):
+                return self.reply(400, {"error": "请求格式应为 JSON 对象"})
+            if payload.get("mime") not in FORMATS:
+                return self.reply(400, {"error": "仅支持 PNG、JPEG、WebP 图片"})
+            if not payload.get("reviewConfirmed"):
+                return self.reply(400, {"error": "请先确认人工复核"})
+            if not str(payload.get("imageSource", "")).strip() or not str(payload.get("imageLicense", "")).strip():
+                return self.reply(400, {"error": "请填写图片来源和授权范围"})
+            image = base64.b64decode(payload.get("image", ""), validate=True)
+            if not image or len(image) > 10 * 1024 * 1024:
+                return self.reply(413, {"error": "图片过大，最大 10 MB"})
+            with Image.open(BytesIO(image)) as source:
+                source.verify()
+            markers = payload.get("markers", [])
+            if not isinstance(markers, list) or len(markers) > 3:
+                return self.reply(400, {"error": "最多标记 3 处区域"})
+            for marker in markers:
+                if not isinstance(marker, dict) or any(not isinstance(marker.get(k), (int, float)) or not 0 <= marker[k] <= 100 for k in ("x", "y", "w", "h")):
+                    return self.reply(400, {"error": "区域坐标无效"})
+                for key in ("phenomenon", "evidence", "status"):
+                    marker[key] = str(marker.get(key, ""))[:300]
+                marker["status"] = marker["status"][:12]
+            for key in ("summary", "limitations", "advice1", "advice2", "imageSource", "imageLicense", "sceneNote", "toolSource", "referenceSource", "runId"):
+                payload[key] = str(payload.get(key, ""))[:500]
+            from src.web_export import render_web_card
+            pdf = render_web_card(payload, image, WEB / "assets" / "observation-card-background.jpg")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition", 'attachment; filename="mural-observation-card.pdf"')
+            self.send_header("Content-Length", str(len(pdf)))
+            self.end_headers()
+            self.wfile.write(pdf)
+        except (ValueError, KeyError, TypeError, binascii.Error, json.JSONDecodeError, UnidentifiedImageError) as exc:
+            return self.reply(400, {"error": f"请求数据无效：{exc}"})
+        except Exception as exc:
+            return self.reply(500, {"error": f"PDF 导出失败：{exc}"})
 
     def reply(self, code, data):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
