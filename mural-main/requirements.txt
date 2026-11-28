@@ -1,0 +1,21 @@
+# 运行依赖（Python 3.13 实测通过）
+#
+# 装了 Anaconda 的同学一般已经有 openai / pydantic / python-dotenv，
+# 可以先跳过这一步；换新机器或者报 ModuleNotFoundError 时再执行：
+#     pip install -r requirements.txt
+#
+# 注意：不要往这里加"只有某个人跑得动"的包。比赛现场只允许使用
+# 阿里云百炼平台提供的模型能力，本地大模型/推理框架一律用不上。
+
+# 调用通义千问（DashScope 兼容 OpenAI 接口）
+openai>=1.40
+
+# 数据结构校验（Card / Observation / 标注格式都靠它）
+# 必须是 2.x：代码里用了 model_validator，1.x 没有这个装饰器
+pydantic>=2.7
+
+# 读取 .env 里的 API Key
+python-dotenv>=1.0
+
+# 卡片渲染（生成一页 PDF 用），还没接入，先占位
+pillow>=10.0
