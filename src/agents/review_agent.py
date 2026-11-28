@@ -22,7 +22,7 @@ from src.qwen_client import ModelReply, QwenClient
 from src.schemas import Observation
 from src.trace import sha256_short
 
-DEFAULT_REVIEW_PROMPT = PROJECT_ROOT / "prompts" / "review_agent.txt"
+DEFAULT_REVIEW_PROMPT = PROJECT_ROOT / "prompts" / "review_agent_v2.txt"
 
 
 class ReviewAgent:
@@ -60,6 +60,9 @@ class ReviewAgent:
                     "region_id": finding.region_id,
                     "disease": finding.disease,
                     "bbox": finding.bbox.as_list(),
+                    # 把面积换算成数字交给 B。
+                    # 不给的话它只能凭"看起来很大"排序，而缩略图上小区域看着都不大。
+                    "area_ratio": round(finding.bbox.area_ratio(), 4),
                     "observation": finding.observation,
                     "impact": finding.impact,
                     "confidence": finding.confidence,

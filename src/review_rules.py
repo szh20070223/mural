@@ -22,6 +22,23 @@ from src.schemas import BoundingBox, ObservedRegion, Observation, Region, Review
 # 卡片上最多放几个区域。赛题原文："在原图上标出 1—3 处值得关注的区域"
 MAX_CARD_REGIONS = 3
 
+# "待判读"：异常存在但类型判断不了。它不是病害，是审查环节的结论。
+DEFERRED_DISEASE = "待判读"
+
+# 卡片上最多留几处"待判读"。
+# 三处里两处写"不知道"，读者会觉得这一页什么都没看出来——
+# 这是展示问题，不是证据问题，所以由代码统一控制，不交给模型自觉。
+MAX_DEFERRED_ON_CARD = 1
+
+# 例外：如果卡片上"有明确类型"的区域不到这个数，允许再补一处待判读，
+# 让卡片保持 3 处（而不是缩成 2 处）。
+#
+# 规则合起来是：
+#   有 2 个以上明确病害 → 待判读最多 1 个（理想形态：两个不同 + 一个待判读）
+#   只有 1 个明确病害   → 允许 1 个明确 + 2 个待判读，卡片仍凑满 3 处
+#   一个明确病害都没有 → 只保留 1 处待判读（整页"不知道"没有意义）
+MIN_TYPED_FOR_NO_FILL = 2
+
 # 两个框的重叠度超过这个值，就认为它们是同一处病害，合并掉。
 # 0.6 是个经验值：低于它通常是"相邻但不相同"（比如两块挨着脱落的颜料），
 # 高于它基本可以确定是同一个东西被标了两遍。
@@ -100,9 +117,11 @@ class _Candidate:
     box: BoundingBox
     disease: str
     confidence: str
-    observation: str            # 新增：可被 B 的 adjusted_observation 覆盖
-    impact: str                 # 新增
+    observation: str
+    impact: str
     review_notes: list[str] = field(default_factory=list)
+    # 类型有倾向但未核实 -> 卡片上写成"X（待复核）"
+    pending_review: bool = False
 
 
 def validate_review(observation: Observation, report: ReviewReport) -> ReviewReport:
@@ -133,6 +152,99 @@ def validate_review(observation: Observation, report: ReviewReport) -> ReviewRep
         )
 
     return report
+
+
+def _bbox_center_distance(a: BoundingBox, b: BoundingBox) -> float:
+    """两个框中心点的距离。归一化坐标下，最大值约 1.41（对角线）。"""
+    ax, ay = (a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2
+    bx, by = (b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+def _diversity_score(candidate: _Candidate, chosen: list[_Candidate]) -> tuple:
+    """给"下一个该上卡谁"打分，越大越优先。
+
+    排序键（从主到次）：
+      0. 是否带类型                   —— "X（待复核）"比"待判读"信息量大，不该排在它后面
+      1. 病害类型是否与已选的不同     —— 一张卡全是一种病，读者会以为图上只有这一种问题
+      2. 置信度是否与已选的不同       —— 同类型但一处"中"一处"待复核·低"，是不同风险等级，可并列
+      3. 与已选区域的中心距离         —— 越远越不像是同一处的重复框选
+      4. 面积                         —— 前面都持平时，大的更值得上卡
+
+    注意这只是"在都站得住的候选之间怎么排"，不改变任何一条的判断结果。
+    """
+    has_type = 0 if candidate.disease == DEFERRED_DISEASE else 1
+    same_type = any(item.disease == candidate.disease for item in chosen)
+    same_confidence = any(item.confidence == candidate.confidence for item in chosen)
+    distance = min(_bbox_center_distance(candidate.box, item.box) for item in chosen)
+    return (
+        has_type,
+        0 if same_type else 1,
+        0 if same_confidence else 1,
+        distance,
+        candidate.box.area_ratio(),
+    )
+
+
+def _compose_card(
+    candidates: list[_Candidate],
+    *,
+    max_regions: int = MAX_CARD_REGIONS,
+) -> list[_Candidate]:
+    """卡片编排：从 B 排好序的候选里挑出最终上卡的 1-3 个。
+
+    B 负责"哪些站得住、谁更重要"，这一步负责"卡片上放哪几个"。
+    后者是展示问题——用代码做比让模型记住更可靠，也不会污染判断。
+
+    规则：
+    1. **B 排第一的那条一定进卡**，它是"最要紧的一处"，不由展示规则决定。
+    2. 后面的位置按 `_diversity_score` 贪心挑：类型 > 置信度 > 位置分离度 > 面积。
+    3. **证据强度优先于多样性**：只要还有"中"及以上的候选，就不会为了凑类型
+       去选一个"低"的；"低"只在没有更强的可选时才进来。
+    4. **待判读最多 1 处**（纯未知，连倾向都没有的那种）。
+       "X（待复核）"不算待判读，它带着类型倾向。
+    5. 例外：有类型的区域不足 2 个时，允许补一处待判读凑满 max_regions，
+       否则卡片会缩成 2 处。
+    """
+    if not candidates:
+        return []
+
+    chosen: list[_Candidate] = [candidates[0]]
+    chosen_ids = {candidates[0].source.region_id}
+    deferred = 1 if chosen[0].disease == DEFERRED_DISEASE else 0
+
+    while len(chosen) < max_regions:
+        pool = [
+            item
+            for item in candidates
+            if item.source.region_id not in chosen_ids
+            and not (
+                item.disease == DEFERRED_DISEASE and deferred >= MAX_DEFERRED_ON_CARD
+            )
+        ]
+        if not pool:
+            break
+
+        best = max(pool, key=lambda item: _diversity_score(item, chosen))
+        chosen.append(best)
+        chosen_ids.add(best.source.region_id)
+        if best.disease == DEFERRED_DISEASE:
+            deferred += 1
+
+    # 明确病害不足 2 个时，允许再补待判读凑满（"放开到 3 处"的规则）
+    typed = sum(1 for item in chosen if item.disease != DEFERRED_DISEASE)
+    if 1 <= typed < MIN_TYPED_FOR_NO_FILL and len(chosen) < max_regions:
+        for candidate in candidates:
+            if len(chosen) >= max_regions:
+                break
+            if candidate.source.region_id in chosen_ids:
+                continue
+            if candidate.disease != DEFERRED_DISEASE:
+                continue
+            chosen.append(candidate)
+            chosen_ids.add(candidate.source.region_id)
+
+    return chosen
 
 
 def apply_verdicts(
@@ -208,17 +320,20 @@ def apply_verdicts(
         impact = verdict.adjusted_impact or finding.impact
 
         if verdict.decision == "defer":
-            # 位置可信、类型不可判：保留框，类型写"待判读"，置信度压到"低"。
-            # 进卡时它是一条"线索"而不是"结论"——
-            # C 写总述时看到"待判读"，就不敢写成"大面积脱落"这种断言。
+            # 类型判不了，但没必要把"它倾向于是什么"也一起丢掉。
+            # 第一位观察员给过类型的话就保留，标成"待复核"——
+            # 卡片上写"颜料层脱落（待复核）"，比单写"待判读"信息量大得多。
+            # 只有第一位观察员自己都写的是"待判读"时，才真的是纯未知。
+            deferred_disease = verdict.adjusted_disease or finding.disease
             candidate = _Candidate(
                 source=finding,
                 box=verdict.adjusted_bbox or finding.bbox,
-                disease="待判读",
+                disease=deferred_disease,
                 confidence=verdict.adjusted_confidence or "低",
                 observation=observation,
                 impact=impact,
                 review_notes=list(verdict.review_notes),
+                pending_review=deferred_disease != DEFERRED_DISEASE,
             )
             stats.deferred += 1
         else:
@@ -302,13 +417,14 @@ def apply_verdicts(
         else:
             deduped.append(candidate)
 
-    # ---- ④ 按 B 的优先级排序、截断、重新编号 ----
+    # ---- ④ 按 B 的优先级排，再按卡片展示规则挑最终 1-3 个 ----
     # 排序放在去重之后：合并会把两条并成一条，先排序再合并会白排。
     deduped.sort(key=lambda item: priority.get(item.source.region_id, 10_000))
 
-    if len(deduped) > max_regions:
-        stats.truncated = len(deduped) - max_regions
-        deduped = deduped[:max_regions]
+    before = len(deduped)
+    deduped = _compose_card(deduped, max_regions=max_regions)
+    if before > len(deduped):
+        stats.truncated = before - len(deduped)
 
     regions: list[Region] = []
     for order, candidate in enumerate(deduped, start=1):
@@ -321,6 +437,7 @@ def apply_verdicts(
                 impact=candidate.impact,
                 confidence=candidate.confidence,
                 review_notes=candidate.review_notes[:2],
+                pending_review=candidate.pending_review,
                 ai_generated=True,
             )
         )

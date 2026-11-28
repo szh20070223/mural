@@ -31,7 +31,7 @@ from src.schemas import AnalysisResult, Observation, ReportDraft, ReviewReport
 # 这个数必须和 Observation.findings 的 max_length 一致，改一处就要改另一处。
 # 为什么不是 3：卡片上只放 3 个，但候选要比最终名额多，
 # 否则 B 审查官剔除一个之后就没有备选了。
-MAX_CANDIDATES = 5
+MAX_CANDIDATES = 10
 
 # 坐标换算的兜底阈值。
 # 有些视觉模型习惯输出 0-1000 的整数坐标（千分制），而不是 0-1。
@@ -158,7 +158,7 @@ class ParseMeta:
     """解析过程中的"异常但可接受"的情况，用来写日志。
 
     这些数字很值钱：比如连续几次 truncated 都大于 0，说明提示词里的
-    "最多 5 个"根本没约束住模型，得在答辩里说明或者改提示词。
+    "最多 6 个"根本没约束住模型，得在答辩里说明或者改提示词。
     """
 
     raw_findings: int = 0      # 模型原本给了几个候选
@@ -214,7 +214,7 @@ def parse_observation(text: str) -> tuple[Observation, ParseMeta]:
     """v2 的输出解析：文本 -> Observation。
 
     顺序很重要：**先截断，再校验**。
-    Observation.findings 有 max_length=5，如果先校验，
+    Observation.findings 有 max_length=10，如果先校验，
     模型给 8 条会直接抛错；但我们其实只想保留前 5 条，不需要为这个重试一次。
     """
     data = extract_json(text)

@@ -265,7 +265,7 @@ class BoundingBox(BaseModel):
 class ObservedRegion(BaseModel):
     """A 观察官吐出的一个候选区域。
 
-    和最终的 Region 的区别：这里允许最多 5 个、允许低置信度，
+    和最终的 Region 的区别：这里允许最多 6 个、允许低置信度，
     因为 A 的职责是"尽量别漏"，B 的职责才是"砍到只剩站得住的"。
     如果把 A 也限制成 3 个，等于让模型在只看一次的情况下就做取舍，
     那是审查官该干的事，不是观察官该干的事。
@@ -273,7 +273,7 @@ class ObservedRegion(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    region_id: str = Field(pattern=r"^C[1-9]$", description="候选编号 C1-C5")
+    region_id: str = Field(pattern=r"^C([1-9]|1[0-2])$", description="候选编号 C1-C10")
     disease: ObservationDisease
     bbox: BoundingBox
     observation: str = Field(
@@ -312,7 +312,7 @@ class Observation(BaseModel):
     """
 
     image_id: str
-    findings: list[ObservedRegion] = Field(default_factory=list, max_length=5)
+    findings: list[ObservedRegion] = Field(default_factory=list, max_length=10)
     limitations: list[str] = Field(default_factory=list, max_length=3)
     summary: str = Field(default="", max_length=120)
 
@@ -340,7 +340,7 @@ class ReviewVerdict(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     region_id: str = Field(
-        pattern=r"^C[1-9]$",
+        pattern=r"^C([1-9]|1[0-2])$",
         description="被裁决的候选编号，必须和 A 给出的编号一致",
     )
     # keep=保留  adjust=改判后保留  defer=保留位置但类型待判
@@ -366,7 +366,7 @@ class ReviewVerdict(BaseModel):
     # merge 时必填：合并到哪一个候选
     merge_into: str | None = Field(
         default=None,
-        pattern=r"^C[1-9]$",
+        pattern=r"^C([1-9]|1[0-2])$",
         description="merge 时必填，指向被合并到的那个候选编号",
     )
     # 这一条进卡时，需要人复核的具体点。建议每条都写，空着说明审得不细
@@ -492,6 +492,18 @@ class Region(BaseModel):
     )
 
     confidence: RegionConfidence
+
+    # 类型有倾向、但还没核实。卡片上显示为"颜料层脱落（待复核）"。
+    #
+    # 和 disease="待判读" 的区别（这两个不要混）：
+    #   "待判读"    = 连倾向都没有，我们不知道它是什么；
+    #   X（待复核） = 倾向于 X，但证据不足以确认。
+    # 前者占一个区域却什么信息都不给；后者既保留判断、又标注了不确定性。
+    # 审查员用 defer 时，如果第一位观察员给过类型，就会走到这里。
+    pending_review: bool = Field(
+        default=False,
+        description="True 表示类型存疑，卡片上会加'（待复核）'后缀",
+    )
 
     review_notes: list[str] = Field(
         default_factory=list,

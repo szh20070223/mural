@@ -64,6 +64,7 @@
 | `observation` | str | **60 字** | 只写看到的：颜色、边界、纹理、走向 |
 | `impact` | str | **40 字** | 对画面内容的影响：挡住了什么、让哪部分无法辨认 |
 | `confidence` | 高/中/低 | — | 三档，没有"无法评估" |
+| `pending_review` | bool | — | `true` 时卡片显示为「X（待复核）」：类型有倾向但未核实。**和 `disease="待判读"` 是两回事**——后者是连倾向都没有 |
 | `review_notes` | list | **2 条 × 30 字** | 具体到"做什么"的复核点 |
 | `ai_generated` | bool | — | 默认 true |
 

@@ -24,7 +24,7 @@ from src.qwen_client import ModelReply, QwenClient
 from src.schemas import Region
 from src.trace import sha256_short
 
-DEFAULT_REPORT_PROMPT = PROJECT_ROOT / "prompts" / "report_agent.txt"
+DEFAULT_REPORT_PROMPT = PROJECT_ROOT / "prompts" / "report_agent_v2.txt"
 
 
 class ReportAgent:
@@ -75,8 +75,12 @@ class ReportAgent:
         lines: list[str] = []
         for region in regions:
             box = ", ".join(f"{value:.0%}" for value in region.bbox.as_list())
+            # 待复核的类型要带上标记，否则 C 会把它当成已确认的病害来写
+            disease_label = region.disease + (
+                "（待复核）" if region.pending_review else ""
+            )
             lines.append(
-                f"- {region.region_id}　{region.disease}"
+                f"- {region.region_id}　{disease_label}"
                 f"（置信度：{region.confidence}，范围：[{box}]）"
             )
             lines.append(f"    观察：{region.observation}")

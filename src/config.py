@@ -74,9 +74,9 @@ QWEN_REVIEW_CROPS = os.getenv("QWEN_REVIEW_CROPS", "true").strip().lower() in {
 # 用环境变量切换，而不是改代码里的字符串。这样 v1/v2 可以并排跑、对比效果：
 #   PowerShell:  $env:VISION_PROMPT_FILE="vision_analysis.txt"
 #
-# 默认 v2：带坐标框的版本，能出观察卡。
-# v1 是早期只出"文字位置"的老版本，只保留作对照，出不了卡片。
-VISION_PROMPT_FILE = os.getenv("VISION_PROMPT_FILE", "vision_analysis_v2.txt")
+# 默认 v3：带坐标框 + 逐病种识别标准 + "待判读"兜底。
+# v2 是更早期的一版，保留下来做对照；v1 只出文字位置，做不出卡片。
+VISION_PROMPT_FILE = os.getenv("VISION_PROMPT_FILE", "vision_analysis_v3.txt")
 
 VISION_PROMPT_PATH = PROJECT_ROOT / "prompts" / VISION_PROMPT_FILE
 
